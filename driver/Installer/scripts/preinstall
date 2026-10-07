@@ -1,0 +1,5 @@
+#!/bin/sh
+
+mkdir -p /Library/Audio/Plug-Ins/HAL
+chown root:wheel /Library/Audio/Plug-Ins/HAL
+chmod 755 /Library/Audio/Plug-Ins/HAL

@@ -1,0 +1,6 @@
+#!/bin/sh
+
+chown -R root:wheel /Library/Audio/Plug-Ins/HAL/BlackHole*ch.driver
+find /Library/Audio/Plug-Ins/HAL/BlackHole*ch.driver -type d -exec chmod 755 {} \;
+find /Library/Audio/Plug-Ins/HAL/BlackHole*ch.driver -type f -exec chmod 644 {} \;
+find /Library/Audio/Plug-Ins/HAL/BlackHole*ch.driver/Contents/MacOS -type f -exec chmod 755 {} \;
