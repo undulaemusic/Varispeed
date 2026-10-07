@@ -63,6 +63,11 @@ void VSBridgeGetStats(VSBridge *bridge, VSBridgeStats *stats);
 void VSBridgeResetCounters(VSBridge *bridge);
 void VSBridgeDestroy(VSBridge *bridge);
 
+// Everything the bridge plays (what you hear, at the output device's rate) is also pushed to
+// this recorder while it is recording. Pass NULL to detach.
+struct VSRecorder;
+void VSBridgeSetRecorder(VSBridge *bridge, struct VSRecorder *recorder);
+
 #ifdef __cplusplus
 }
 #endif

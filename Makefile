@@ -12,8 +12,8 @@ all: $(TOOLS)
 build/%: tools/%.c tools/vsdevice.h driver/BlackHole/VarispeedProperties.h | build
 	$(CC) $(CFLAGS) -o $@ $< $(LIBS)
 
-build/vsbridge: bridge/vsbridge_cli.c bridge/VSBridge.c bridge/VSBridge.h $(LSR_SRC) | build
-	$(CC) $(CFLAGS) -DHAVE_CONFIG_H -I$(LSR) -o $@ bridge/vsbridge_cli.c bridge/VSBridge.c $(LSR_SRC) $(LIBS)
+build/vsbridge: bridge/vsbridge_cli.c bridge/VSBridge.c bridge/VSBridge.h bridge/VSRecorder.c bridge/VSRecorder.h $(LSR_SRC) | build
+	$(CC) $(CFLAGS) -DHAVE_CONFIG_H -I$(LSR) -o $@ bridge/vsbridge_cli.c bridge/VSBridge.c bridge/VSRecorder.c $(LSR_SRC) $(LIBS)
 
 build:
 	mkdir -p build

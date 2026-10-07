@@ -4,6 +4,7 @@
 // They talk to each other and to the control thread only through C11 atomics.
 
 #include "VSBridge.h"
+#include "VSRecorder.h"
 #include "../third_party/libsamplerate/samplerate.h"
 
 #include <CoreAudio/CoreAudio.h>
@@ -85,6 +86,7 @@ struct VSBridge {
     double outputDeviceLatencySeconds;
 
     const char *_Atomic lastError;
+    VSRecorder *_Atomic recorder;
 };
 
 #pragma mark - Helpers
@@ -398,6 +400,7 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
     if (produced < frames) memset(res + produced * kChannels, 0, (frames - produced) * kChannels * sizeof(float));
 
     DetectGlitches((GlitchState){ &b->glitchX1, &b->glitchX2, &b->glitchPeak, &b->glitchWarmup, &b->glitches }, res, frames, kChannels, outNominal);
+    VSRecorderPush(atomic_load_explicit(&b->recorder, memory_order_acquire), res, frames);
 
     if (!b->config.muteOutput) {
         for (int c = 0; c < kChannels; c++) {
@@ -597,6 +600,10 @@ void VSBridgeResetCounters(VSBridge *b) {
     atomic_store(&b->inputGlitches, 0);
     atomic_store(&b->resyncs, 0);
     atomic_store(&b->resets, 0);
+}
+
+void VSBridgeSetRecorder(VSBridge *b, VSRecorder *recorder) {
+    atomic_store_explicit(&b->recorder, recorder, memory_order_release);
 }
 
 void VSBridgeDestroy(VSBridge *b) {

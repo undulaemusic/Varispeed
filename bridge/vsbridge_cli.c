@@ -5,6 +5,7 @@
 //
 // --out takes 1-based channel numbers (MOTU: 1,2 = Main Out; 11,12 = Phones).
 #include "VSBridge.h"
+#include "VSRecorder.h"
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -19,6 +20,7 @@ int main(int argc, char **argv) {
     VSBridgeConfig cfg;
     VSBridgeDefaultConfig(&cfg);
     double seconds = 0;
+    const char *recordPath = NULL;   // --record FILE.wav: record what the bridge plays, saved at Varispeed's rate
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "--out") && v) { int l, r; if (sscanf(v, "%d,%d", &l, &r) == 2) { cfg.outputChannels[0] = l - 1; cfg.outputChannels[1] = r - 1; } i++; }
@@ -29,6 +31,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--seconds") && v) { seconds = atof(v); i++; }
         else if (!strcmp(a, "--device-uid") && v) { cfg.outputDeviceUID = v; i++; }
         else if (!strcmp(a, "--mute")) cfg.muteOutput = true;
+        else if (!strcmp(a, "--record") && v) { recordPath = v; i++; }
         else { fprintf(stderr, "usage: vsbridge [--out L,R] [--quality best|medium|fast] [--in-buffer N] [--out-buffer N] [--margin MS] [--seconds N] [--mute]\n"); return 1; }
     }
     signal(SIGINT, onSignal);
@@ -40,8 +43,15 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Bridge failed to start: %s\n", s.lastError ? s.lastError : "unknown error");
         return 1;
     }
+    VSRecorder *rec = NULL;
     VSBridgeStats s;
     sleep(1);
+    if (recordPath) {
+        VSBridgeGetStats(b, &s);
+        rec = VSRecorderCreate();
+        VSBridgeSetRecorder(b, rec);
+        if (!VSRecorderStart(rec, recordPath, s.outputSampleRate)) { fprintf(stderr, "Can't record to %s\n", recordPath); return 1; }
+    }
     VSBridgeGetStats(b, &s);
     printf("Bridge running: Varispeed (%.0f Hz) -> %s (%.0f Hz), channels %d,%d%s. Ctrl-C to stop.\n",
            s.inputSampleRate, s.outputDeviceName, s.outputSampleRate, cfg.outputChannels[0] + 1, cfg.outputChannels[1] + 1, cfg.muteOutput ? " [MUTED]" : "");
@@ -55,6 +65,14 @@ int main(int argc, char **argv) {
                (unsigned long long)s.glitches, (unsigned long long)s.inputGlitches);
         fflush(stdout);
         if (s.lastError) { fprintf(stderr, "Error: %s\n", s.lastError); break; }
+    }
+    if (rec) {
+        VSBridgeGetStats(b, &s);
+        VSRecorderStatus rs; VSRecorderGetStatus(rec, &rs);
+        bool ok = VSRecorderStop(rec, s.inputSampleRate);
+        printf("\nRecorded %.1f s to %s at %.0f Hz (%s, dropped frames %llu)\n", rs.seconds, recordPath, s.inputSampleRate,
+               ok ? "ok" : "FAILED", (unsigned long long)rs.droppedFrames);
+        VSBridgeSetRecorder(b, NULL);
     }
     VSBridgeGetStats(b, &s);
     printf("\nSummary: underruns %llu, overflows %llu, resyncs %llu, glitches out %llu / in %llu, output device latency %.2f ms\n",
