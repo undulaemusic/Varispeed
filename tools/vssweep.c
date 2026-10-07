@@ -83,8 +83,8 @@ int main(int argc, char **argv) {
            (char)(ai >> 24), (char)(ai >> 16), (char)(ai >> 8), (char)ai, minRamp, gRate);
 
     struct { double speed, ramp; } steps[] = {
-        {1.0, 0}, {0.5, 0}, {2.0, 0}, {0.25, 0}, {1.0, 0},          // instant jumps across the range
-        {0.25, 1.0}, {2.0, 2.0}, {0.75, 0.5}, {1.5, 0.1}, {1.0, 0.5}, // ramps
+        {1.0, 0}, {0.75, 0}, {2.0, 0}, {0.5, 0}, {1.0, 0},          // instant jumps across the range
+        {0.5, 1.0}, {2.0, 2.0}, {0.75, 0.5}, {1.5, 0.1}, {1.0, 0.5},  // ramps
     };
     int nsteps = sizeof steps / sizeof steps[0];
     // VS_STEPS="0.5:0,2:0.5,..." overrides the built-in step list (speed:ramp pairs)
@@ -115,7 +115,7 @@ int main(int argc, char **argv) {
     atomic_store(&gDiscontinuities, 0); atomic_store(&gBackwards, 0); atomic_store(&gWorstJump, 0);
 
     gStart = now_s();
-    // VS_RANDOM=N: instead of the step list, change to a random speed (0.25-2) with a random
+    // VS_RANDOM=N: instead of the step list, change to a random speed (min-max range) with a random
     // ramp every 1-6 s for N seconds, printing one summary line per minute.
     if (getenv("VS_RANDOM")) {
         double total = atof(getenv("VS_RANDOM")), t0 = now_s(), nextChange = 0, nextReport = 60;
@@ -124,7 +124,8 @@ int main(int argc, char **argv) {
         while (now_s() - t0 < total) {
             double t = now_s() - t0;
             if (t >= nextChange) {
-                double sp = pow(2.0, -2.0 + 3.0 * (random() / (double)RAND_MAX));
+                double lo = log2(kVarispeed_MinSpeed), hi = log2(kVarispeed_MaxSpeed);
+                double sp = pow(2.0, lo + (hi - lo) * (random() / (double)RAND_MAX));
                 double rp = (random() % 4 == 0) ? 0.0 : 3.0 * (random() / (double)RAND_MAX);
                 vs_set_double(dev, kVarispeedProperty_RampSeconds, rp);
                 vs_set_double(dev, kVarispeedProperty_TargetSpeed, sp);

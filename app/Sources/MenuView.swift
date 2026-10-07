@@ -63,7 +63,7 @@ struct MenuView: View {
             }
 
             HStack(spacing: 6) {
-                Text("25%").font(.caption2).foregroundStyle(.secondary)
+                Text("50%").font(.caption2).foregroundStyle(.secondary)
                 SpeedSlider(value: Binding(get: { engine.sliderPosition }, set: { engine.sliderPosition = $0 }),
                             onDoubleClick: { engine.resetSpeed() })
                     .help("Double-click to reset to 100%")

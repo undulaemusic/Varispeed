@@ -23,7 +23,7 @@
 // Max semitones the speed may fall per zero-timestamp period (applies to the next change).
 #define kVarispeedProperty_DebugMaxFall         0x76736d66 /* 'vsmf' */
 
-#define kVarispeed_MinSpeed              0.25
+#define kVarispeed_MinSpeed              0.5
 #define kVarispeed_MaxSpeed              2.0
 #define kVarispeed_MaxRampSeconds        30.0
 

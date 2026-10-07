@@ -20,7 +20,7 @@ struct Take: Identifiable, Hashable {
 /// Owns the bridge and recorder, talks to the Varispeed driver, and publishes state for the UI.
 @MainActor
 final class Engine: ObservableObject {
-    static let minSemitones = 12 * log2(Double(kVarispeed_MinSpeed))   // -24
+    static let minSemitones = 12 * log2(Double(kVarispeed_MinSpeed))   // -12
     static let maxSemitones = 12 * log2(Double(kVarispeed_MaxSpeed))   // +12
     /// The driver never glides faster than this (kVarispeed_MinRampSeconds in the driver);
     /// shorter settings behave identically, so the slider starts here.
@@ -125,8 +125,8 @@ final class Engine: ObservableObject {
         targetSpeed = min(max(s, Double(kVarispeed_MinSpeed)), Double(kVarispeed_MaxSpeed))
     }
 
-    /// Slider position -1...1 with 100 % in the middle: the left half covers -24...0 semitones
-    /// (25 %...100 %), the right half 0...+12 semitones (100 %...200 %). Snaps to 100 % near the middle.
+    /// Slider position -1...1 with 100 % in the middle: the left half covers the minimum...0 semitones
+    /// (50 %...100 %), the right half 0...+12 semitones (100 %...200 %). Snaps to 100 % near the middle.
     var sliderPosition: Double {
         get { semitones < 0 ? semitones / -Self.minSemitones : semitones / Self.maxSemitones }
         set {
