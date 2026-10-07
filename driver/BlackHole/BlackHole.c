@@ -283,7 +283,15 @@ static UInt64                       gDevice2_IOIsRunning                = 0;
 #ifndef kVarispeed_ZeroTimeStampPeriod
 #define                             kVarispeed_ZeroTimeStampPeriod      4096
 #endif
-static const UInt32                 kDevice_RingBufferSize              = kVarispeed_ZeroTimeStampPeriod;
+#ifndef kVarispeed_ClockAlgorithm
+#define                             kVarispeed_ClockAlgorithm           kAudioDeviceClockAlgorithmRaw
+#endif
+//	Tuning values; the Pending copies are set via debug properties and take effect when IO
+//	next starts, because the period and algorithm must not change while the clock is running.
+static UInt32                       kDevice_RingBufferSize              = kVarispeed_ZeroTimeStampPeriod;
+static UInt32                       gVarispeed_ClockAlgorithm           = kVarispeed_ClockAlgorithm;
+static UInt32                       gVarispeed_PendingPeriod            = kVarispeed_ZeroTimeStampPeriod;
+static UInt32                       gVarispeed_PendingClockAlgorithm    = kVarispeed_ClockAlgorithm;
 static Float64                      gDevice_HostTicksPerFrame           = 0.0;
 static Float64                      gDevice_AdjustedTicksPerFrame       = 0.0;
 static Float64                      gDevice_PreviousTicks               = 0.0;
@@ -313,6 +321,8 @@ static const AudioServerPlugInCustomPropertyInfo kVarispeed_CustomProperties[] =
     { kVarispeedProperty_TargetSpeed,  kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_RampSeconds,  kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_CurrentSpeed, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
+    { kVarispeedProperty_DebugPeriod,  kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
+    { kVarispeedProperty_DebugClockAlgorithm, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
 };
 static const UInt32 kVarispeed_NumCustomProperties = sizeof(kVarispeed_CustomProperties) / sizeof(kVarispeed_CustomProperties[0]);
 
@@ -2267,6 +2277,10 @@ static Boolean	BlackHole_HasDeviceProperty(AudioServerPlugInDriverRef inDriver, 
 		case kVarispeedProperty_TargetSpeed:
 		case kVarispeedProperty_RampSeconds:
 		case kVarispeedProperty_CurrentSpeed:
+		case kVarispeedProperty_DebugPeriod:
+		case kVarispeedProperty_DebugClockAlgorithm:
+		case kAudioDevicePropertyClockAlgorithm:
+		case kAudioDevicePropertyClockIsStable:
 			theAnswer = true;
 			break;
 			
@@ -2332,12 +2346,16 @@ static OSStatus	BlackHole_IsDevicePropertySettable(AudioServerPlugInDriverRef in
 		case kAudioDevicePropertyIcon:
 		case kAudioObjectPropertyCustomPropertyInfoList:
 		case kVarispeedProperty_CurrentSpeed:
+		case kAudioDevicePropertyClockAlgorithm:
+		case kAudioDevicePropertyClockIsStable:
 			*outIsSettable = false;
 			break;
 		
 		case kAudioDevicePropertyNominalSampleRate:
 		case kVarispeedProperty_TargetSpeed:
 		case kVarispeedProperty_RampSeconds:
+		case kVarispeedProperty_DebugPeriod:
+		case kVarispeedProperty_DebugClockAlgorithm:
 			*outIsSettable = true;
 			break;
 		
@@ -2458,9 +2476,16 @@ static OSStatus	BlackHole_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 			*outDataSize = kVarispeed_NumCustomProperties * sizeof(AudioServerPlugInCustomPropertyInfo);
 			break;
 
+		case kAudioDevicePropertyClockAlgorithm:
+		case kAudioDevicePropertyClockIsStable:
+			*outDataSize = sizeof(UInt32);
+			break;
+
 		case kVarispeedProperty_TargetSpeed:
 		case kVarispeedProperty_RampSeconds:
 		case kVarispeedProperty_CurrentSpeed:
+		case kVarispeedProperty_DebugPeriod:
+		case kVarispeedProperty_DebugClockAlgorithm:
 			*outDataSize = sizeof(CFPropertyListRef);
 			break;
 		
@@ -2919,6 +2944,20 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			*outDataSize = sizeof(UInt32);
 			break;
 
+		case kAudioDevicePropertyClockAlgorithm:
+			//	Varispeed: our time stamps are exact and change rate on purpose, so the HAL
+			//	must use them as-is instead of smoothing them (which lags and causes resyncs).
+			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for kAudioDevicePropertyClockAlgorithm");
+			*((UInt32*)outData) = gVarispeed_ClockAlgorithm;
+			*outDataSize = sizeof(UInt32);
+			break;
+
+		case kAudioDevicePropertyClockIsStable:
+			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for kAudioDevicePropertyClockIsStable");
+			*((UInt32*)outData) = 0;
+			*outDataSize = sizeof(UInt32);
+			break;
+
 		case kAudioObjectPropertyCustomPropertyInfoList:
 			{
 				UInt32 theCount = inDataSize / sizeof(AudioServerPlugInCustomPropertyInfo);
@@ -2931,12 +2970,16 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 		case kVarispeedProperty_TargetSpeed:
 		case kVarispeedProperty_RampSeconds:
 		case kVarispeedProperty_CurrentSpeed:
+		case kVarispeedProperty_DebugPeriod:
+		case kVarispeedProperty_DebugClockAlgorithm:
 			FailWithAction(inDataSize < sizeof(CFPropertyListRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for a Varispeed property");
 			{
 				Float64 theValue;
 				pthread_mutex_lock(&gDevice_IOMutex);
 				if (inAddress->mSelector == kVarispeedProperty_TargetSpeed) { theValue = gVarispeed_TargetSpeed; }
 				else if (inAddress->mSelector == kVarispeedProperty_RampSeconds) { theValue = gVarispeed_RampSeconds; }
+				else if (inAddress->mSelector == kVarispeedProperty_DebugPeriod) { theValue = gVarispeed_PendingPeriod; }
+				else if (inAddress->mSelector == kVarispeedProperty_DebugClockAlgorithm) { theValue = gVarispeed_PendingClockAlgorithm; }
 				else { theValue = Varispeed_SpeedAt(mach_absolute_time()); }
 				pthread_mutex_unlock(&gDevice_IOMutex);
 				*((CFPropertyListRef*)outData) = CFNumberCreate(NULL, kCFNumberFloat64Type, &theValue);
@@ -3027,6 +3070,24 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 					*outNumberPropertiesChanged += 1;
 				}
 				pthread_mutex_unlock(&gDevice_IOMutex);
+			}
+			break;
+
+		case kVarispeedProperty_DebugPeriod:
+		case kVarispeedProperty_DebugClockAlgorithm:
+			{
+				Float64 theNewValue;
+				FailWithAction(!Varispeed_ReadNumber(inDataSize, inData, &theNewValue), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_SetDevicePropertyData: Varispeed debug value must be a CFNumber");
+				pthread_mutex_lock(&gPlugIn_StateMutex);
+				if (inAddress->mSelector == kVarispeedProperty_DebugPeriod) {
+					gVarispeed_PendingPeriod = (UInt32)Varispeed_Clamp(theNewValue, 256.0, 16384.0);
+				} else {
+					UInt32 theAlgorithm = (UInt32)theNewValue;
+					if (theAlgorithm == kAudioDeviceClockAlgorithmRaw || theAlgorithm == kAudioDeviceClockAlgorithmSimpleIIR || theAlgorithm == kAudioDeviceClockAlgorithm12PtMovingWindowAverage) {
+						gVarispeed_PendingClockAlgorithm = theAlgorithm;
+					}
+				}
+				pthread_mutex_unlock(&gPlugIn_StateMutex);
 			}
 			break;
 
@@ -4488,6 +4549,17 @@ static OSStatus	BlackHole_StartIO(AudioServerPlugInDriverRef inDriver, AudioObje
         gDevice_AnchorSampleTime = 0;
         gDevice_AnchorHostTime = mach_absolute_time();
         gDevice_PreviousTicks = 0;
+        Boolean theTuningChanged = (kDevice_RingBufferSize != gVarispeed_PendingPeriod) || (gVarispeed_ClockAlgorithm != gVarispeed_PendingClockAlgorithm);
+        kDevice_RingBufferSize = gVarispeed_PendingPeriod;
+        gVarispeed_ClockAlgorithm = gVarispeed_PendingClockAlgorithm;
+        if (theTuningChanged) {
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                AudioObjectPropertyAddress theAddresses[] = {
+                    { kAudioDevicePropertyZeroTimeStampPeriod, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
+                    { kAudioDevicePropertyClockAlgorithm, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain } };
+                gPlugIn_Host->PropertiesChanged(gPlugIn_Host, kObjectID_Device, 2, theAddresses);
+            });
+        }
         pthread_mutex_lock(&gDevice_IOMutex);
         gVarispeed_AppliedSpeed = Varispeed_SpeedAt(gDevice_AnchorHostTime);
         gVarispeed_PeriodEndTicks = gDevice_HostTicksPerFrame * ((Float64)kDevice_RingBufferSize) / gVarispeed_AppliedSpeed;

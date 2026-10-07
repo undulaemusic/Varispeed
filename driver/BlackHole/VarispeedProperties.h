@@ -10,6 +10,11 @@
 // Speed the clock is running at right now, mid-ramp included (read only).
 #define kVarispeedProperty_CurrentSpeed  0x76736373 /* 'vscs' */
 
+// Development tuning (take effect the next time IO starts on the device):
+// zero-timestamp period in frames, and the HAL clock algorithm ('raww', 'iirf', 'mavg').
+#define kVarispeedProperty_DebugPeriod          0x76737a70 /* 'vszp' */
+#define kVarispeedProperty_DebugClockAlgorithm  0x76736361 /* 'vsca' */
+
 #define kVarispeed_MinSpeed              0.25
 #define kVarispeed_MaxSpeed              2.0
 #define kVarispeed_MaxRampSeconds        30.0

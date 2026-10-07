@@ -4,7 +4,7 @@
 // input sample time continues exactly where the previous cycle ended (no jumps, gaps or
 // backwards time) and once per second reports the measured speed vs. the driver's speed.
 //
-// Usage: vssweep [seconds-per-step=3]
+// Usage: vssweep [seconds-per-step=3] [zts-period-frames] [clock-algorithm: raww|iirf|mavg] [min-ramp-seconds]
 #include "vsdevice.h"
 #include <mach/mach_time.h>
 #include <stdatomic.h>
@@ -58,6 +58,19 @@ int main(int argc, char **argv) {
     AudioObjectPropertyAddress ra = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     UInt32 sz = sizeof(gRate); AudioObjectGetPropertyData(dev, &ra, 0, NULL, &sz, &gRate);
 
+    if (argc > 2) vs_set_double(dev, kVarispeedProperty_DebugPeriod, atof(argv[2]));
+    if (argc > 3 && strlen(argv[3]) == 4) {
+        const char *a = argv[3];
+        vs_set_double(dev, kVarispeedProperty_DebugClockAlgorithm, (double)(((UInt32)a[0] << 24) | ((UInt32)a[1] << 16) | ((UInt32)a[2] << 8) | (UInt32)a[3]));
+    }
+    double minRamp = argc > 4 ? atof(argv[4]) : 0.0;
+    double period = 0, algo = 0;
+    vs_get_double(dev, kVarispeedProperty_DebugPeriod, &period);
+    vs_get_double(dev, kVarispeedProperty_DebugClockAlgorithm, &algo);
+    UInt32 ai = (UInt32)algo;
+    printf("zero-timestamp period %.0f frames, clock algorithm '%c%c%c%c', min ramp %.2fs, %.0f Hz\n", period,
+           (char)(ai >> 24), (char)(ai >> 16), (char)(ai >> 8), (char)ai, minRamp, gRate);
+
     struct { double speed, ramp; } steps[] = {
         {1.0, 0}, {0.5, 0}, {2.0, 0}, {0.25, 0}, {1.0, 0},          // instant jumps across the range
         {0.25, 1.0}, {2.0, 2.0}, {0.75, 0.5}, {1.5, 0.1}, {1.0, 0.5}, // ramps
@@ -75,7 +88,7 @@ int main(int argc, char **argv) {
 
     printf("%-6s %-6s %-5s | %-9s %-9s %-9s\n", "target", "ramp", "t", "driver", "measured", "discont");
     for (int s = 0; s < nsteps; s++) {
-        vs_set_double(dev, kVarispeedProperty_RampSeconds, steps[s].ramp);
+        vs_set_double(dev, kVarispeedProperty_RampSeconds, fmax(steps[s].ramp, minRamp));
         vs_set_double(dev, kVarispeedProperty_TargetSpeed, steps[s].speed);
         double t0 = now_s();
         uint64_t f0 = atomic_load(&gFrames); double tw = t0;
