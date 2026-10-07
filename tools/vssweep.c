@@ -69,6 +69,7 @@ int main(int argc, char **argv) {
         const char *a = argv[3];
         vs_set_double(dev, kVarispeedProperty_DebugClockAlgorithm, (double)(((UInt32)a[0] << 24) | ((UInt32)a[1] << 16) | ((UInt32)a[2] << 8) | (UInt32)a[3]));
     }
+    if (getenv("VS_MAXRISE")) vs_set_double(dev, kVarispeedProperty_DebugMaxRise, atof(getenv("VS_MAXRISE")));
     double minRamp = argc > 4 ? atof(argv[4]) : 0.0;
     double period = 0, algo = 0;
     vs_get_double(dev, kVarispeedProperty_DebugPeriod, &period);

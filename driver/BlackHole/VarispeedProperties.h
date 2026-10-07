@@ -14,6 +14,8 @@
 // zero-timestamp period in frames, and the HAL clock algorithm ('raww', 'iirf', 'mavg').
 #define kVarispeedProperty_DebugPeriod          0x76737a70 /* 'vszp' */
 #define kVarispeedProperty_DebugClockAlgorithm  0x76736361 /* 'vsca' */
+// Max semitones the speed may rise per zero-timestamp period (applies to the next change).
+#define kVarispeedProperty_DebugMaxRise         0x76736d72 /* 'vsmr' */
 
 #define kVarispeed_MinSpeed              0.25
 #define kVarispeed_MaxSpeed              2.0
