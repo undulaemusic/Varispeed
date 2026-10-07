@@ -45,19 +45,21 @@ int main(int argc, char **argv) {
     VSBridgeGetStats(b, &s);
     printf("Bridge running: Varispeed (%.0f Hz) -> %s (%.0f Hz), channels %d,%d%s. Ctrl-C to stop.\n",
            s.inputSampleRate, s.outputDeviceName, s.outputSampleRate, cfg.outputChannels[0] + 1, cfg.outputChannels[1] + 1, cfg.muteOutput ? " [MUTED]" : "");
-    printf("%7s %7s %8s %8s %9s %8s %6s | %5s %5s %5s %5s\n", "time", "speed", "fill ms", "target", "corr ppm", "lat ms", "cpu%", "under", "over", "glitch", "reset");
+    printf("%7s %7s %8s %8s %9s %8s %6s | %5s %5s %5s %6s %5s\n", "time", "speed", "fill ms", "target", "corr ppm", "lat ms", "cpu%", "under", "over", "resyn", "glitch", "inGlt");
     double t = 0;
     while (!gStop && (seconds <= 0 || t < seconds)) {
         sleep(1); t += 1;
         VSBridgeGetStats(b, &s);
-        printf("%6.0fs %6.1f%% %8.2f %8.2f %9.0f %8.2f %6.2f | %5llu %5llu %5llu %5llu\n", t, s.speed * 100, s.ringFillMs, s.targetFillMs, s.correctionPPM,
-               s.latencyMs, s.cpuLoad * 100, (unsigned long long)s.underruns, (unsigned long long)s.overflows, (unsigned long long)s.glitches, (unsigned long long)s.resets);
+        printf("%6.0fs %6.1f%% %8.2f %8.2f %9.0f %8.2f %6.2f | %5llu %5llu %5llu %6llu %5llu\n", t, s.speed * 100, s.ringFillMs, s.targetFillMs, s.correctionPPM,
+               s.latencyMs, s.cpuLoad * 100, (unsigned long long)s.underruns, (unsigned long long)s.overflows, (unsigned long long)s.resyncs,
+               (unsigned long long)s.glitches, (unsigned long long)s.inputGlitches);
         fflush(stdout);
         if (s.lastError) { fprintf(stderr, "Error: %s\n", s.lastError); break; }
     }
     VSBridgeGetStats(b, &s);
-    printf("\nSummary: underruns %llu, overflows %llu, glitches %llu, resets %llu, output device latency %.2f ms\n",
-           (unsigned long long)s.underruns, (unsigned long long)s.overflows, (unsigned long long)s.glitches, (unsigned long long)s.resets, s.outputDeviceLatencyMs);
+    printf("\nSummary: underruns %llu, overflows %llu, resyncs %llu, glitches out %llu / in %llu, output device latency %.2f ms\n",
+           (unsigned long long)s.underruns, (unsigned long long)s.overflows, (unsigned long long)s.resyncs,
+           (unsigned long long)s.glitches, (unsigned long long)s.inputGlitches, s.outputDeviceLatencyMs);
     VSBridgeDestroy(b);
     return 0;
 }

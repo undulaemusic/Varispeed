@@ -24,8 +24,9 @@
 #define kFillSmoothingSeconds  0.2
 #define kKp                    0.5                  // rate correction per second of fill error
 #define kKi                    0.05
-#define kMaxCorrection         0.03                 // +-3 %
-#define kGapDecayPerSecond     0.85                 // remembered worst input gap decays this much per second
+#define kMaxCorrection         0.01                 // +-1 % (about 0.17 semitones)
+#define kGapDecayPerSecond     0.5                  // remembered worst input gap decays this much per second
+#define kResyncExcessSeconds   0.04                 // fill this far above target -> drop the excess at once
 
 struct VSBridge {
     VSBridgeConfig config;
@@ -54,11 +55,13 @@ struct VSBridge {
     double hostTicksPerSecond;
     float glitchX1, glitchX2, glitchPeak;
     int glitchWarmup;
+    float inGlitchX1, inGlitchX2, inGlitchPeak;   // same detector on the raw Varispeed input (input thread)
+    int inGlitchWarmup;
     double resamplerDelayInputFrames;
 
     // stats (written by IO threads, read by anyone)
     _Atomic double statInRealRate, statOutRealRate, statFillSeconds, statTargetSeconds, statCorrection, statCpu;
-    _Atomic uint64_t underruns, overflows, glitches, resets, inputCycles, outputCycles;
+    _Atomic uint64_t underruns, overflows, glitches, inputGlitches, resets, resyncs, inputCycles, outputCycles;
 
     // output channel mapping, fixed at start
     struct { UInt32 buffer, channel, stride; bool valid; } outMap[kChannels];
@@ -168,6 +171,28 @@ static double SRCDelayFrames(VSBridgeQuality q) {
 
 #pragma mark - Realtime IOProcs
 
+// Test-tone glitch detector: for a sine of amplitude A and angular frequency w (rad/sample), the
+// second difference never exceeds A*w^2. Missing / repeated samples produce much larger spikes.
+// Only meaningful while a pure tone of <= 880 Hz is playing (used by the automated tests).
+typedef struct { float *x1, *x2, *peak; int *warmup; _Atomic uint64_t *count; } GlitchState;
+
+static void DetectGlitches(GlitchState g, const float *x, UInt32 frames, UInt32 stride, double rate) {
+    double wmax = 2.0 * M_PI * 1000.0 / rate;
+    for (UInt32 i = 0; i < frames; i++) {
+        float v = x[i * stride];
+        float a = fabsf(v);
+        *g.peak = a > *g.peak ? a : *g.peak * 0.99999f;
+        float d2 = v - 2.0f * *g.x1 + *g.x2;
+        if (*g.warmup > 0) (*g.warmup)--;
+        else if (*g.peak > 0.01f && fabsf(d2) > 4.0 * *g.peak * wmax * wmax + 1e-4) {
+            atomic_fetch_add_explicit(g.count, 1, memory_order_relaxed);
+            *g.warmup = 64;   // count one event, not every sample of it
+        }
+        *g.x2 = *g.x1;
+        *g.x1 = v;
+    }
+}
+
 static OSStatus InputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const AudioBufferList *in, const AudioTimeStamp *inTime,
                             AudioBufferList *out, const AudioTimeStamp *outTime, void *ctx) {
     VSBridge *b = ctx;
@@ -196,28 +221,10 @@ static OSStatus InputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const 
         }
         atomic_store_explicit(&b->writePos, w + frames, memory_order_release);
     }
+    DetectGlitches((GlitchState){ &b->inGlitchX1, &b->inGlitchX2, &b->inGlitchPeak, &b->inGlitchWarmup, &b->inputGlitches },
+                   src, frames, ch, atomic_load_explicit(&b->inNominalRate, memory_order_relaxed));
     atomic_fetch_add_explicit(&b->inputCycles, 1, memory_order_relaxed);
     return noErr;
-}
-
-// Test-tone glitch detector: for a sine of amplitude A and angular frequency w (rad/sample), the
-// second difference never exceeds A*w^2. Missing / repeated samples produce much larger spikes.
-// Only meaningful while a pure tone of <= 880 Hz is playing (used by the automated tests).
-static void DetectGlitches(VSBridge *b, const float *x, UInt32 frames, double outRate) {
-    double wmax = 2.0 * M_PI * 1000.0 / outRate;
-    for (UInt32 i = 0; i < frames; i++) {
-        float v = x[i * kChannels];
-        float a = fabsf(v);
-        b->glitchPeak = a > b->glitchPeak ? a : b->glitchPeak * 0.99999f;
-        float d2 = v - 2.0f * b->glitchX1 + b->glitchX2;
-        if (b->glitchWarmup > 0) b->glitchWarmup--;
-        else if (b->glitchPeak > 0.01f && fabsf(d2) > 4.0 * b->glitchPeak * wmax * wmax + 1e-4) {
-            atomic_fetch_add_explicit(&b->glitches, 1, memory_order_relaxed);
-            b->glitchWarmup = 64;   // count one event, not every sample of it
-        }
-        b->glitchX2 = b->glitchX1;
-        b->glitchX1 = v;
-    }
 }
 
 static void Reset(VSBridge *b) {
@@ -261,6 +268,19 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
 
     float *res = b->srcOut;
     UInt32 produced = 0;
+
+    // Too much audio queued (output started late, or input burst): drop the excess in one go
+    // rather than slowly draining it with an audible pitch correction.
+    if (fillSeconds > targetSeconds + (b->priming ? 0.005 : kResyncExcessSeconds)) {
+        uint64_t keep = (uint64_t)(targetSeconds * inRate);
+        r = w - keep;
+        atomic_store_explicit(&b->readPos, r, memory_order_release);
+        fillSeconds = (double)keep / inRate;
+        b->fillErrLP = 0;
+        b->integral = 0;
+        if (!b->priming) atomic_fetch_add_explicit(&b->resyncs, 1, memory_order_relaxed);
+        b->glitchWarmup = 4096;
+    }
 
     if (b->priming) {
         if (fillSeconds >= targetSeconds) { b->priming = false; b->fillErrLP = fillSeconds - targetSeconds; b->integral = 0; }
@@ -315,7 +335,7 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
     }
     if (produced < frames) memset(res + produced * kChannels, 0, (frames - produced) * kChannels * sizeof(float));
 
-    DetectGlitches(b, res, frames, outNominal);
+    DetectGlitches((GlitchState){ &b->glitchX1, &b->glitchX2, &b->glitchPeak, &b->glitchWarmup, &b->glitches }, res, frames, kChannels, outNominal);
 
     // --- write to the chosen output channels
     if (!b->config.muteOutput) {
@@ -500,6 +520,8 @@ void VSBridgeGetStats(VSBridge *b, VSBridgeStats *s) {
     s->underruns = atomic_load(&b->underruns);
     s->overflows = atomic_load(&b->overflows);
     s->glitches = atomic_load(&b->glitches);
+    s->inputGlitches = atomic_load(&b->inputGlitches);
+    s->resyncs = atomic_load(&b->resyncs);
     s->resets = atomic_load(&b->resets);
     s->inputCycles = atomic_load(&b->inputCycles);
     s->outputCycles = atomic_load(&b->outputCycles);
@@ -510,6 +532,8 @@ void VSBridgeResetCounters(VSBridge *b) {
     atomic_store(&b->underruns, 0);
     atomic_store(&b->overflows, 0);
     atomic_store(&b->glitches, 0);
+    atomic_store(&b->inputGlitches, 0);
+    atomic_store(&b->resyncs, 0);
     atomic_store(&b->resets, 0);
 }
 

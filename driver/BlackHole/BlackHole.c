@@ -310,16 +310,21 @@ static Float64                      gDevice_AnchorSampleTime            = 0.0;
 #ifndef kVarispeed_MinRampSeconds
 #define                             kVarispeed_MinRampSeconds           0.1
 #endif
-// Speeding up too quickly makes the HAL's rate estimate (taken from the last zero-timestamp
-// period) lag far enough that it wakes late and skips ahead (a sample-time discontinuity).
-// So rising ramps are limited to this many semitones per zero-timestamp period. To keep that
-// per-period step constant, rising ramps interpolate 1/s linearly in host time, which is
-// geometric in device frames (equal semitones per frame).
+// The HAL estimates the clock rate from the last zero-timestamp period, so any rate change
+// is "unannounced". Speeding up too quickly makes it wake late and skip ahead; slowing down
+// too quickly makes it stall, and big jumps can make it abandon the device clock entirely.
+// So ramps are limited to this many semitones per zero-timestamp period. To keep the
+// per-period step constant, ramps interpolate 1/s linearly in host time, which is geometric
+// in device frames (equal semitones per frame). Slowing down this way decelerates like a
+// tape stop: fast at first, gentler near the end.
 #ifndef kVarispeed_MaxRiseSemitonesPerPeriod
 #define                             kVarispeed_MaxRiseSemitonesPerPeriod 0.5
 #endif
+#ifndef kVarispeed_MaxFallSemitonesPerPeriod
+#define                             kVarispeed_MaxFallSemitonesPerPeriod 1.0
+#endif
 static Float64                      gVarispeed_MaxRiseSemitonesPerPeriod = kVarispeed_MaxRiseSemitonesPerPeriod;
-static Boolean                      gVarispeed_RampIsHarmonic           = false;
+static Float64                      gVarispeed_MaxFallSemitonesPerPeriod = kVarispeed_MaxFallSemitonesPerPeriod;
 // Smaller client IO buffers tolerate less HAL rate-estimate lag (measured: 64-frame buffers
 // are clean at 0.5 st/period, 32-frame buffers need 0.25), so the limit scales down below this.
 #define                             kVarispeed_MaxRiseReferenceBuffer   64.0
@@ -343,6 +348,7 @@ static const AudioServerPlugInCustomPropertyInfo kVarispeed_CustomProperties[] =
     { kVarispeedProperty_DebugPeriod,  kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_DebugClockAlgorithm, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_DebugMaxRise, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
+    { kVarispeedProperty_DebugMaxFall, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
 };
 static const UInt32 kVarispeed_NumCustomProperties = sizeof(kVarispeed_CustomProperties) / sizeof(kVarispeed_CustomProperties[0]);
 
@@ -354,10 +360,7 @@ static Float64 Varispeed_SpeedAt(UInt64 inHostTime)
     }
     Float64 theFraction = (Float64)(inHostTime - gVarispeed_RampStartHostTime) / gVarispeed_RampTicks;
     if (theFraction >= 1.0) { return gVarispeed_TargetSpeed; }
-    if (gVarispeed_RampIsHarmonic) {
-        return 1.0 / (1.0 / gVarispeed_RampFromSpeed + (1.0 / gVarispeed_TargetSpeed - 1.0 / gVarispeed_RampFromSpeed) * theFraction);
-    }
-    return gVarispeed_RampFromSpeed * pow(gVarispeed_TargetSpeed / gVarispeed_RampFromSpeed, theFraction);
+    return 1.0 / (1.0 / gVarispeed_RampFromSpeed + (1.0 / gVarispeed_TargetSpeed - 1.0 / gVarispeed_RampFromSpeed) * theFraction);
 }
 
 static Float64 Varispeed_Clamp(Float64 inValue, Float64 inMin, Float64 inMax)
@@ -2303,6 +2306,7 @@ static Boolean	BlackHole_HasDeviceProperty(AudioServerPlugInDriverRef inDriver, 
 		case kVarispeedProperty_DebugPeriod:
 		case kVarispeedProperty_DebugClockAlgorithm:
 		case kVarispeedProperty_DebugMaxRise:
+		case kVarispeedProperty_DebugMaxFall:
 		case kAudioDevicePropertyClockAlgorithm:
 		case kAudioDevicePropertyClockIsStable:
 			theAnswer = true;
@@ -2381,6 +2385,7 @@ static OSStatus	BlackHole_IsDevicePropertySettable(AudioServerPlugInDriverRef in
 		case kVarispeedProperty_DebugPeriod:
 		case kVarispeedProperty_DebugClockAlgorithm:
 		case kVarispeedProperty_DebugMaxRise:
+		case kVarispeedProperty_DebugMaxFall:
 			*outIsSettable = true;
 			break;
 		
@@ -2512,6 +2517,7 @@ static OSStatus	BlackHole_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 		case kVarispeedProperty_DebugPeriod:
 		case kVarispeedProperty_DebugClockAlgorithm:
 		case kVarispeedProperty_DebugMaxRise:
+		case kVarispeedProperty_DebugMaxFall:
 			*outDataSize = sizeof(CFPropertyListRef);
 			break;
 		
@@ -2999,6 +3005,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 		case kVarispeedProperty_DebugPeriod:
 		case kVarispeedProperty_DebugClockAlgorithm:
 		case kVarispeedProperty_DebugMaxRise:
+		case kVarispeedProperty_DebugMaxFall:
 			FailWithAction(inDataSize < sizeof(CFPropertyListRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for a Varispeed property");
 			{
 				Float64 theValue;
@@ -3008,6 +3015,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 				else if (inAddress->mSelector == kVarispeedProperty_DebugPeriod) { theValue = gVarispeed_PendingPeriod; }
 				else if (inAddress->mSelector == kVarispeedProperty_DebugClockAlgorithm) { theValue = gVarispeed_PendingClockAlgorithm; }
 				else if (inAddress->mSelector == kVarispeedProperty_DebugMaxRise) { theValue = gVarispeed_MaxRiseSemitonesPerPeriod; }
+				else if (inAddress->mSelector == kVarispeedProperty_DebugMaxFall) { theValue = gVarispeed_MaxFallSemitonesPerPeriod; }
 				else { theValue = Varispeed_SpeedAt(mach_absolute_time()); }
 				pthread_mutex_unlock(&gDevice_IOMutex);
 				*((CFPropertyListRef*)outData) = CFNumberCreate(NULL, kCFNumberFloat64Type, &theValue);
@@ -3093,14 +3101,14 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 					gVarispeed_RampFromSpeed = Varispeed_SpeedAt(theNow);
 					gVarispeed_RampStartHostTime = theNow;
 					Float64 theRampSeconds = fmax(gVarispeed_RampSeconds, kVarispeed_MinRampSeconds);
-					gVarispeed_RampIsHarmonic = (theNewSpeed > gVarispeed_RampFromSpeed);
-					if (gVarispeed_RampIsHarmonic) {
+					{
 						//	With 1/s linear in time, ln(s) changes by a constant amount per device
-						//	frame: c = ln(2)/12 * maxSemitones / period. Then d(1/s)/dt = -c * fs,
-						//	so the shortest allowed ramp is (1/from - 1/to) / (c * fs).
-						Float64 theMaxRise = gVarispeed_MaxRiseSemitonesPerPeriod * fmin(1.0, (Float64)gVarispeed_SmallestIOBuffer / kVarispeed_MaxRiseReferenceBuffer);
-						Float64 thePerFrame = log(2.0) / 12.0 * theMaxRise / (Float64)kDevice_RingBufferSize;
-						theRampSeconds = fmax(theRampSeconds, (1.0 / gVarispeed_RampFromSpeed - 1.0 / theNewSpeed) / (thePerFrame * gDevice_SampleRate));
+						//	frame: c = ln(2)/12 * maxSemitones / period. Then |d(1/s)/dt| = c * fs,
+						//	so the shortest allowed ramp is |1/from - 1/to| / (c * fs).
+						Float64 theMaxStep = (theNewSpeed > gVarispeed_RampFromSpeed) ? gVarispeed_MaxRiseSemitonesPerPeriod : gVarispeed_MaxFallSemitonesPerPeriod;
+						theMaxStep *= fmin(1.0, (Float64)gVarispeed_SmallestIOBuffer / kVarispeed_MaxRiseReferenceBuffer);
+						Float64 thePerFrame = log(2.0) / 12.0 * theMaxStep / (Float64)kDevice_RingBufferSize;
+						theRampSeconds = fmax(theRampSeconds, fabs(1.0 / gVarispeed_RampFromSpeed - 1.0 / theNewSpeed) / (thePerFrame * gDevice_SampleRate));
 					}
 					gVarispeed_RampTicks = theRampSeconds * gHostTicksPerSecond;
 					gVarispeed_TargetSpeed = theNewSpeed;
@@ -3145,11 +3153,13 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			break;
 
 		case kVarispeedProperty_DebugMaxRise:
+		case kVarispeedProperty_DebugMaxFall:
 			{
 				Float64 theNewValue;
 				FailWithAction(!Varispeed_ReadNumber(inDataSize, inData, &theNewValue), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_SetDevicePropertyData: Varispeed debug value must be a CFNumber");
 				pthread_mutex_lock(&gDevice_IOMutex);
-				gVarispeed_MaxRiseSemitonesPerPeriod = Varispeed_Clamp(theNewValue, 0.05, 12.0);
+				if (inAddress->mSelector == kVarispeedProperty_DebugMaxRise) { gVarispeed_MaxRiseSemitonesPerPeriod = Varispeed_Clamp(theNewValue, 0.05, 12.0); }
+				else { gVarispeed_MaxFallSemitonesPerPeriod = Varispeed_Clamp(theNewValue, 0.05, 12.0); }
 				pthread_mutex_unlock(&gDevice_IOMutex);
 			}
 			break;

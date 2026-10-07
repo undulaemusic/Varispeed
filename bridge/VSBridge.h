@@ -45,7 +45,8 @@ typedef struct {
     double latencyMs;                           // ring + resampler + output buffer (bridge-added)
     double outputDeviceLatencyMs;               // output device's own latency + safety offset
     double cpuLoad;                             // fraction of the output IO cycle spent in the bridge
-    uint64_t underruns, overflows, glitches, resets;
+    uint64_t underruns, overflows, resets, resyncs;
+    uint64_t glitches, inputGlitches;           // test-tone detector on output / on raw Varispeed input
     uint64_t inputCycles, outputCycles;
     const char *lastError;                      // static string or NULL
 } VSBridgeStats;
