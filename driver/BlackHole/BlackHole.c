@@ -282,6 +282,14 @@ static Float64                      gDevice_AdjustedTicksPerFrame       = 0.0;
 static Float64                      gDevice_PreviousTicks               = 0.0;
 static UInt64                       gDevice_NumberTimeStamps            = 0;
 static Float64                      gDevice_AnchorSampleTime            = 0.0;
+
+// Varispeed: speed ratio s. Each zero-timestamp period of kDevice_RingBufferSize frames
+// spans (1/s) times its normal host-time length, so clients render s times as fast as
+// real time while the reported nominal sample rate stays unchanged.
+#ifndef kVarispeed_DefaultSpeed
+#define                             kVarispeed_DefaultSpeed             1.0
+#endif
+static Float64                      gVarispeed_Speed                    = kVarispeed_DefaultSpeed;
 static UInt64                       gDevice_AnchorHostTime              = 0;
 
 static bool                         gStream_Input_IsActive              = true;
@@ -4434,6 +4442,7 @@ static OSStatus	BlackHole_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, 
     else {
         theAdjustedTicksPerRingBuffer = gDevice_HostTicksPerFrame * ((Float64)kDevice_RingBufferSize);
     }
+    theAdjustedTicksPerRingBuffer /= gVarispeed_Speed;
     
 	theNextTickOffset = gDevice_PreviousTicks + theAdjustedTicksPerRingBuffer;
     

@@ -30,7 +30,8 @@ xcodebuild \
   kNumber_Of_Channels=2
   kSampleRates=44100,48000,88200,96000
   kCanBeDefaultDevice=false
-  kCanBeDefaultSystemDevice=false' \
+  kCanBeDefaultSystemDevice=false
+  kVarispeed_DefaultSpeed=${DEFAULT_SPEED:-1.0}' \
   | grep -E "error|warning: .*BlackHole.c|BUILD (SUCCEEDED|FAILED)" || true
 
 test -d "$ROOT/build/$driverName.driver"
