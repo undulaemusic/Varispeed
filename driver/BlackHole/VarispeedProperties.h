@@ -18,6 +18,8 @@
 #define kVarispeedProperty_DebugMaxRise         0x76736d72 /* 'vsmr' */
 // Max semitones the speed may fall per zero-timestamp period (applies to the next change).
 #define kVarispeedProperty_DebugMaxFall         0x76736d66 /* 'vsmf' */
+// Smallest client IO buffer the driver has seen since IO started (read only).
+#define kVarispeedProperty_DebugSmallestBuffer  0x76737362 /* 'vssb' */
 
 #define kVarispeed_MinSpeed              0.25
 #define kVarispeed_MaxSpeed              2.0
