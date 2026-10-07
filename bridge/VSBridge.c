@@ -29,9 +29,9 @@
 // The HAL's view of the Varispeed timeline jumps a little at every zero-timestamp update
 // (~20-90 ms apart), which would be heard as flutter. So the playback rate follows the driver's
 // exact speed curve, and the HAL timeline only steers a slow, smoothed position correction.
-#define kErrorSmoothingSeconds 0.3
-#define kCorrectionSeconds     1.0                  // remove a position error over about this long
-#define kMaxPhaseCorrection    0.005                // ... but never change the rate by more than 0.5 %
+#define kErrorSmoothingSeconds 0.04
+#define kCorrectionSeconds     0.1                  // remove a position error over about this long
+#define kMaxPhaseCorrection    0.06                 // ... but never change the rate by more than 6 %
 #define kPhaseGain             0.05                 // fallback when the driver's curve isn't available
 #define kMaxPhaseCorrectionFallback 0.01
 #define kResyncSeconds         0.03                 // position error beyond this -> jump instead of correcting
@@ -92,6 +92,8 @@ struct VSBridge {
 
     // stats (written by IO threads, read by anyone)
     _Atomic double statInRealRate, statOutRealRate, statFillSeconds, statTargetSeconds, statCorrection, statCpu, statSpeed;
+    _Atomic double statTimelineSpeed, statTimelineErrorSeconds;
+    _Atomic bool statUsingCurve;
     _Atomic uint64_t underruns, overflows, glitches, inputGlitches, resets, resyncs, inputCycles, outputCycles;
 
     // output channel mapping, fixed at start
@@ -373,11 +375,13 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
         // How many input frames this buffer covers: from the driver's exact speed curve when we
         // have it (smooth), else from the HAL timeline (steps at every zero-timestamp update).
         double span, nudge, maxNudge, curveSpeed;
-        if (RampSpeedAt(b, 0.5 * (tStart + tEnd) - ticksD, &curveSpeed)) {
+        bool usingCurve = RampSpeedAt(b, 0.5 * (tStart + tEnd) - ticksD, &curveSpeed);
+        atomic_store_explicit(&b->statUsingCurve, usingCurve, memory_order_relaxed);
+        if (usingCurve) {
             span = curveSpeed * inNominal * dt;
-            b->errLP += (err - b->errLP) * fmin(1.0, dt / kErrorSmoothingSeconds);
-            nudge = b->errLP * dt / kCorrectionSeconds;
-            maxNudge = kMaxPhaseCorrection * span;
+            b->errLP += (err - b->errLP) * fmin(1.0, dt / b->config.errorSmoothingSeconds);
+            nudge = b->errLP * dt / b->config.correctionSeconds;
+            maxNudge = b->config.maxCorrection * span;
         } else {
             span = p1 - p0;
             nudge = kPhaseGain * err;
@@ -395,14 +399,16 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
         double slack = ((double)w - (b->playPos + inFrames + lookahead)) / inRate;
         b->playPos += inFrames;
         if (b->clock - b->slackWindowStart > kSlackWindowSeconds) {
-            if (b->minSlack > kBigSlackSeconds) b->delay -= b->minSlack - kDecaySlackSeconds;   // resyncs once
-            else if (b->minSlack > kDecaySlackSeconds) b->delay -= kDelayDecayPerSecond * kSlackWindowSeconds;
+            double keep = kDecaySlackSeconds + b->config.cushionMs / 1000.0;
+            if (b->minSlack > kBigSlackSeconds + keep) b->delay -= b->minSlack - keep;           // resyncs once
+            else if (b->minSlack > keep) b->delay -= kDelayDecayPerSecond * kSlackWindowSeconds;
             b->minSlack = slack;
             b->slackWindowStart = b->clock;
         } else if (slack < b->minSlack) {
             b->minSlack = slack;
         }
-        if (slack < kLowSlackSeconds && b->clock - b->lastStepUpTime > 0.05) {
+        double cushion = b->config.cushionMs / 1000.0;
+        if (slack < kLowSlackSeconds + cushion && b->clock - b->lastStepUpTime > 0.05) {
             b->delay += fmin(kDelayStepUp - fmin(0.0, slack), kMaxDelayStep);   // an underrun also adds the shortfall
             b->lastStepUpTime = b->clock;
         }
@@ -438,6 +444,8 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
         atomic_store_explicit(&b->readPos, r, memory_order_release);
         if (produced < frames) atomic_fetch_add_explicit(&b->underruns, 1, memory_order_relaxed);
         atomic_store_explicit(&b->statSpeed, span / dt / inNominal, memory_order_relaxed);
+        atomic_store_explicit(&b->statTimelineSpeed, (p1 - p0) / dt / inNominal, memory_order_relaxed);
+        atomic_store_explicit(&b->statTimelineErrorSeconds, err / inRate, memory_order_relaxed);
     }
     if (produced < frames) memset(res + produced * kChannels, 0, (frames - produced) * kChannels * sizeof(float));
 
@@ -513,6 +521,10 @@ void VSBridgeDefaultConfig(VSBridgeConfig *c) {
     c->inputBufferFrames = 64;
     c->outputBufferFrames = 128;
     c->safetyMarginMs = 2.0;
+    c->cushionMs = 5.0;
+    c->errorSmoothingSeconds = kErrorSmoothingSeconds;
+    c->correctionSeconds = kCorrectionSeconds;
+    c->maxCorrection = kMaxPhaseCorrection;
 }
 
 VSBridge *VSBridgeCreate(const VSBridgeConfig *config) {
@@ -647,6 +659,9 @@ void VSBridgeGetStats(VSBridge *b, VSBridgeStats *s) {
     s->inputRealRate = atomic_load(&b->statInRealRate);
     s->outputRealRate = atomic_load(&b->statOutRealRate);
     s->speed = atomic_load(&b->statSpeed);
+    s->timelineSpeed = atomic_load(&b->statTimelineSpeed);
+    s->timelineErrorMs = atomic_load(&b->statTimelineErrorSeconds) * 1000.0;
+    s->usingSpeedCurve = atomic_load(&b->statUsingCurve);
     s->ringFillMs = atomic_load(&b->statFillSeconds) * 1000.0;
     s->targetFillMs = atomic_load(&b->statTargetSeconds) * 1000.0;
     s->correctionPPM = atomic_load(&b->statCorrection) * 1e6;

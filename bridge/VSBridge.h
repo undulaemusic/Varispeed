@@ -31,7 +31,13 @@ typedef struct {
     VSBridgeQuality quality;
     uint32_t inputBufferFrames;     // IO buffer this process asks of Varispeed (0 = leave as is)
     uint32_t outputBufferFrames;    // IO buffer this process asks of the output device (0 = leave as is)
-    double safetyMarginMs;          // extra ring-buffer cushion beyond the minimum
+    double safetyMarginMs;          // (unused, kept for compatibility)
+    double cushionMs;               // spare audio kept in reserve beyond the measured minimum; absorbs
+                                    // the HAL timeline lagging the smooth speed curve at the start of glides
+    // Steering toward the HAL timeline (position control on top of the driver's speed curve):
+    double errorSmoothingSeconds;   // low-pass on the position error (hides per-update HAL jolts)
+    double correctionSeconds;       // remove a position error over about this long
+    double maxCorrection;           // max rate change the steering may apply (fraction)
     bool muteOutput;                // run everything but write silence (for silent testing)
 } VSBridgeConfig;
 
@@ -40,7 +46,10 @@ typedef struct {
     char outputDeviceName[128];
     double inputSampleRate, outputSampleRate;   // nominal
     double inputRealRate, outputRealRate;       // frames per real second (from rate scalars)
-    double speed;                               // inputRealRate / inputSampleRate
+    double speed;                               // playback speed this cycle (from the driver's curve)
+    double timelineSpeed;                       // speed implied by the HAL's input timeline
+    double timelineErrorMs;                     // play position minus HAL timeline position
+    bool usingSpeedCurve;                       // false: driver curve unavailable, following the HAL timeline
     double ringFillMs;                          // audio queued in the ring, in real time
     double targetFillMs;                        // D: how far behind the Varispeed timeline the output plays
     double correctionPPM;                       // position-error correction applied this cycle

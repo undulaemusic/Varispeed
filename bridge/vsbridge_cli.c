@@ -28,12 +28,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--in-buffer") && v) { cfg.inputBufferFrames = (uint32_t)atoi(v); i++; }
         else if (!strcmp(a, "--out-buffer") && v) { cfg.outputBufferFrames = (uint32_t)atoi(v); i++; }
         else if (!strcmp(a, "--margin") && v) { cfg.safetyMarginMs = atof(v); i++; }
+        else if (!strcmp(a, "--cushion") && v) { cfg.cushionMs = atof(v); i++; }
         else if (!strcmp(a, "--seconds") && v) { seconds = atof(v); i++; }
         else if (!strcmp(a, "--device-uid") && v) { cfg.outputDeviceUID = v; i++; }
         else if (!strcmp(a, "--mute")) cfg.muteOutput = true;
         else if (!strcmp(a, "--record") && v) { recordPath = v; i++; }
         else { fprintf(stderr, "usage: vsbridge [--out L,R] [--quality best|medium|fast] [--in-buffer N] [--out-buffer N] [--margin MS] [--seconds N] [--mute]\n"); return 1; }
     }
+    if (getenv("VS_SMOOTH")) cfg.errorSmoothingSeconds = atof(getenv("VS_SMOOTH"));
+    if (getenv("VS_CORR")) cfg.correctionSeconds = atof(getenv("VS_CORR"));
+    if (getenv("VS_MAXCORR")) cfg.maxCorrection = atof(getenv("VS_MAXCORR"));
     signal(SIGINT, onSignal);
     signal(SIGTERM, onSignal);
 
@@ -64,6 +68,7 @@ int main(int argc, char **argv) {
                s.latencyMs, s.cpuLoad * 100, (unsigned long long)s.underruns, (unsigned long long)s.overflows, (unsigned long long)s.resyncs,
                (unsigned long long)s.glitches, (unsigned long long)s.inputGlitches);
         fflush(stdout);
+        if (getenv("VS_DEBUG")) printf("        curve %s %.4f  timeline %.4f  timeline error %+.2f ms\n", s.usingSpeedCurve ? "on " : "OFF", s.speed, s.timelineSpeed, s.timelineErrorMs);
         if (s.lastError) { fprintf(stderr, "Error: %s\n", s.lastError); break; }
     }
     if (rec) {
