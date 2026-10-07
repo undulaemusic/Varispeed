@@ -151,7 +151,11 @@ final class Engine: ObservableObject {
         driverInstalled = true
         VSControlSetDouble(dev, AudioObjectPropertySelector(kVarispeedProperty_RampSeconds), rampSeconds)
         var target = 1.0
-        if VSControlGetDouble(dev, AudioObjectPropertySelector(kVarispeedProperty_TargetSpeed), &target) { targetSpeed = target }
+        if VSControlGetDouble(dev, AudioObjectPropertySelector(kVarispeedProperty_TargetSpeed), &target) {
+            // Keep within the app's range (an older driver allowed down to 25 %).
+            targetSpeed = min(max(target, Double(kVarispeed_MinSpeed)), Double(kVarispeed_MaxSpeed))
+            if targetSpeed != target { sendSpeed() }
+        }
     }
 
     // MARK: - Bridge

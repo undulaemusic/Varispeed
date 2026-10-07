@@ -8,7 +8,7 @@ CTL="$ROOT/build/varispeedctl"
 BRIDGE=$!
 trap 'kill $BRIDGE 2>/dev/null; "$CTL" --ramp 0.5 1 >/dev/null' EXIT
 sleep 2
-for s in 1 0.9 0.75 0.5 0.25 1 1.5 2 1; do
+for s in 1 0.9 0.75 0.5 1 1.5 2 1; do
   printf "\n>>> Speed %s  " "$s"; "$CTL" "$s" | sed 's/^/(/; s/$/)/'
   sleep 8
 done
