@@ -91,7 +91,6 @@ struct MenuView: View {
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     .frame(width: 42, alignment: .trailing)
             }
-            .help("How long speed changes take. Big jumps can take a little longer: the driver limits how fast its clock may change so Core Audio keeps up.")
         }
     }
 
@@ -120,7 +119,7 @@ struct MenuView: View {
             }
 
             if !engine.takes.isEmpty {
-                Text("Drag a take into Live").font(.caption).foregroundStyle(.secondary)
+                Text("Drag and drop into your DAW").font(.caption).foregroundStyle(.secondary)
                 VStack(spacing: 2) {
                     ForEach(engine.takes) { take in TakeRow(take: take) }
                 }
@@ -208,7 +207,7 @@ struct TakeRow: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onDrag { NSItemProvider(contentsOf: take.url) ?? NSItemProvider() }
-        .help("\(take.sampleRate) Hz · drag into Live")
+        .help("\(take.sampleRate) Hz · drag into your DAW")
     }
 }
 
