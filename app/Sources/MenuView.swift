@@ -44,10 +44,16 @@ struct MenuView: View {
     private var speedSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
-                Text(percent(engine.currentSpeed))
-                    .font(.system(size: 30, weight: .semibold, design: .rounded).monospacedDigit())
-                Text(semitoneText(12 * log2(engine.currentSpeed)))
-                    .font(.system(.body, design: .rounded).monospacedDigit())
+                EditableReadout(display: percent(engine.currentSpeed),
+                                editValue: String(format: "%.1f", engine.targetSpeed * 100),
+                                unit: "%",
+                                font: .system(size: 30, weight: .semibold, design: .rounded).monospacedDigit(),
+                                fieldWidth: 110) { engine.setPercent($0) }
+                EditableReadout(display: semitoneText(12 * log2(engine.currentSpeed)),
+                                editValue: String(format: "%.2f", engine.semitones),
+                                unit: "st",
+                                font: .system(.body, design: .rounded).monospacedDigit(),
+                                fieldWidth: 64) { engine.setSemitones($0) }
                     .foregroundStyle(.secondary)
                 Spacer()
                 if abs(engine.currentSpeed - engine.targetSpeed) > 0.0005 {
@@ -80,14 +86,6 @@ struct MenuView: View {
                 Button("100%") { engine.resetSpeed() }
                     .controlSize(.small)
                     .keyboardShortcut("0")
-            }
-            .disabled(!engine.driverInstalled)
-
-            HStack(spacing: 10) {
-                Text("Set").font(.callout)
-                ValueField(unit: "%", help: "Type a speed in percent (25 to 200) and press Return") { engine.setPercent($0) }
-                ValueField(unit: "st", help: "Type semitones (−24 to +12) and press Return") { engine.setSemitones($0) }
-                Spacer()
             }
             .disabled(!engine.driverInstalled)
 
@@ -216,26 +214,48 @@ struct TakeRow: View {
     }
 }
 
-/// A small box: type a number and press Return. Accepts a leading + or − (including the
-/// typographic minus), a trailing unit, and a comma as decimal point.
-struct ValueField: View {
+/// Shows a value; double-click to type a new one. Return commits, Escape or clicking away cancels.
+/// Accepts a leading + or − (including the typographic minus), the unit, and a comma decimal point.
+struct EditableReadout: View {
+    let display: String
+    let editValue: String          // what the box starts with when editing begins
     let unit: String
-    let help: String
+    let font: Font
+    let fieldWidth: CGFloat
     let onCommit: (Double) -> Void
+
+    @State private var editing = false
     @State private var text = ""
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 3) {
-            TextField(unit, text: $text)
-                .textFieldStyle(.roundedBorder)
-                .controlSize(.small)
-                .multilineTextAlignment(.trailing)
-                .frame(width: 52)
-                .focused($focused)
-                .onSubmit(commit)
-                .help(help)
-            Text(unit).font(.caption).foregroundStyle(.secondary)
+        Group {
+            if editing {
+                HStack(spacing: 3) {
+                    TextField("", text: $text)
+                        .textFieldStyle(.plain)
+                        .font(font)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: fieldWidth)
+                        .padding(.horizontal, 4)
+                        .background(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.accentColor, lineWidth: 1.5))
+                        .focused($focused)
+                        .onSubmit(commit)
+                        .onExitCommand { editing = false }
+                        .onChange(of: focused) { isFocused in if !isFocused { editing = false } }
+                    Text(unit).font(font).foregroundStyle(.secondary)
+                }
+            } else {
+                Text(display)
+                    .font(font)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) {
+                        text = editValue
+                        editing = true
+                        DispatchQueue.main.async { focused = true }
+                    }
+                    .help("Double-click to type a value")
+            }
         }
     }
 
@@ -247,8 +267,7 @@ struct ValueField: View {
             .replacingOccurrences(of: "+", with: "")
             .trimmingCharacters(in: .whitespaces)
         if let v = Double(cleaned) { onCommit(v) }
-        text = ""
-        focused = false
+        editing = false
     }
 }
 
