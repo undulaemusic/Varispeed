@@ -326,6 +326,7 @@ struct SpeedSlider: NSViewRepresentable {
     func updateNSView(_ slider: ResettableSlider, context: Context) {
         context.coordinator.parent = self
         slider.onDoubleClick = onDoubleClick
+        slider.isEnabled = context.environment.isEnabled
         if abs(slider.doubleValue - value) > 1e-9 { slider.doubleValue = value }
     }
 }
