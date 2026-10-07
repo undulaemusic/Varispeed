@@ -25,6 +25,7 @@ final class Engine: ObservableObject {
     /// The driver never glides faster than this (kVarispeed_MinRampSeconds in the driver);
     /// shorter settings behave identically, so the slider starts here.
     static let minGlideSeconds = 0.1
+    static let maxGlideSeconds = 2.0
 
     // MARK: Speed
     @Published var targetSpeed: Double = 1.0 {
@@ -79,7 +80,7 @@ final class Engine: ObservableObject {
     private var lastRetry = Date.distantPast
 
     init() {
-        rampSeconds = max(Self.minGlideSeconds, defaults.object(forKey: "rampSeconds") as? Double ?? 0.5)
+        rampSeconds = min(Self.maxGlideSeconds, max(Self.minGlideSeconds, defaults.object(forKey: "rampSeconds") as? Double ?? 0.5))
         bridgeEnabled = defaults.object(forKey: "bridgeEnabled") as? Bool ?? true
         outputUID = defaults.string(forKey: "outputUID") ?? ""
         outputLeftChannel = defaults.object(forKey: "outputLeftChannel") as? Int ?? 0

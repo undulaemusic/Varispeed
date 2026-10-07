@@ -368,6 +368,24 @@ static Float64 Varispeed_Clamp(Float64 inValue, Float64 inMin, Float64 inMax)
     return inValue;
 }
 
+//	Starts a ramp from wherever the clock is at theNow to theTarget, taking the glide time but
+//	never faster than the HAL can follow. Caller holds gDevice_IOMutex.
+static void Varispeed_StartRamp(UInt64 theNow, Float64 theTarget)
+{
+    gVarispeed_RampFromSpeed = Varispeed_SpeedAt(theNow);
+    gVarispeed_RampStartHostTime = theNow;
+    Float64 theRampSeconds = fmax(gVarispeed_RampSeconds, kVarispeed_MinRampSeconds);
+    //	With 1/s linear in time, ln(s) changes by a constant amount per device frame:
+    //	c = ln(2)/12 * maxSemitones / period. Then |d(1/s)/dt| = c * fs, so the shortest
+    //	allowed ramp is |1/from - 1/to| / (c * fs).
+    Float64 theMaxStep = (theTarget > gVarispeed_RampFromSpeed) ? gVarispeed_MaxRiseSemitonesPerPeriod : gVarispeed_MaxFallSemitonesPerPeriod;
+    Float64 thePerFrame = log(2.0) / 12.0 * theMaxStep / (Float64)kDevice_RingBufferSize;
+    theRampSeconds = fmax(theRampSeconds, fabs(1.0 / gVarispeed_RampFromSpeed - 1.0 / theTarget) / (thePerFrame * gDevice_SampleRate));
+    gVarispeed_RampTicks = theRampSeconds * gHostTicksPerSecond;
+    gVarispeed_TargetSpeed = theTarget;
+    gVarispeed_RampGeneration += 1;
+}
+
 //	Reads a double out of a CFNumber property-list value.
 static Boolean Varispeed_ReadNumber(UInt32 inDataSize, const void* inData, Float64* outValue)
 {
@@ -3118,22 +3136,7 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 				pthread_mutex_lock(&gDevice_IOMutex);
 				if (theNewSpeed != gVarispeed_TargetSpeed)
 				{
-					//	start a new ramp from wherever the clock is right now
-					UInt64 theNow = mach_absolute_time();
-					gVarispeed_RampFromSpeed = Varispeed_SpeedAt(theNow);
-					gVarispeed_RampStartHostTime = theNow;
-					Float64 theRampSeconds = fmax(gVarispeed_RampSeconds, kVarispeed_MinRampSeconds);
-					{
-						//	With 1/s linear in time, ln(s) changes by a constant amount per device
-						//	frame: c = ln(2)/12 * maxSemitones / period. Then |d(1/s)/dt| = c * fs,
-						//	so the shortest allowed ramp is |1/from - 1/to| / (c * fs).
-						Float64 theMaxStep = (theNewSpeed > gVarispeed_RampFromSpeed) ? gVarispeed_MaxRiseSemitonesPerPeriod : gVarispeed_MaxFallSemitonesPerPeriod;
-						Float64 thePerFrame = log(2.0) / 12.0 * theMaxStep / (Float64)kDevice_RingBufferSize;
-						theRampSeconds = fmax(theRampSeconds, fabs(1.0 / gVarispeed_RampFromSpeed - 1.0 / theNewSpeed) / (thePerFrame * gDevice_SampleRate));
-					}
-					gVarispeed_RampTicks = theRampSeconds * gHostTicksPerSecond;
-					gVarispeed_TargetSpeed = theNewSpeed;
-					gVarispeed_RampGeneration += 1;
+					Varispeed_StartRamp(mach_absolute_time(), theNewSpeed);
 					outChangedAddresses[0] = *inAddress;
 					outChangedAddresses[1] = *inAddress;
 					outChangedAddresses[1].mSelector = kVarispeedProperty_RampParameters;
@@ -3197,8 +3200,18 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 				if (theNewRamp != gVarispeed_RampSeconds)
 				{
 					gVarispeed_RampSeconds = theNewRamp;
-					outChangedAddresses[*outNumberPropertiesChanged] = *inAddress;
-					*outNumberPropertiesChanged += 1;
+					outChangedAddresses[0] = *inAddress;
+					*outNumberPropertiesChanged = 1;
+					//	A glide in progress continues from where it is, toward the same target,
+					//	taking the new glide time from now.
+					UInt64 theNow = mach_absolute_time();
+					if (Varispeed_SpeedAt(theNow) != gVarispeed_TargetSpeed)
+					{
+						Varispeed_StartRamp(theNow, gVarispeed_TargetSpeed);
+						outChangedAddresses[1] = *inAddress;
+						outChangedAddresses[1].mSelector = kVarispeedProperty_RampParameters;
+						*outNumberPropertiesChanged = 2;
+					}
 				}
 				pthread_mutex_unlock(&gDevice_IOMutex);
 			}

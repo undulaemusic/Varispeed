@@ -93,7 +93,7 @@ struct MenuView: View {
 
             HStack {
                 Text("Glide").font(.callout)
-                Slider(value: $engine.rampSeconds, in: Engine.minGlideSeconds...5)
+                Slider(value: $engine.rampSeconds, in: Engine.minGlideSeconds...Engine.maxGlideSeconds)
                 Text(String(format: "%.1f s", engine.rampSeconds))
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     .frame(width: 42, alignment: .trailing)
