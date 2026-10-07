@@ -64,7 +64,9 @@ struct MenuView: View {
 
             HStack(spacing: 6) {
                 Text("25%").font(.caption2).foregroundStyle(.secondary)
-                Slider(value: Binding(get: { engine.sliderPosition }, set: { engine.sliderPosition = $0 }), in: -1...1)
+                SpeedSlider(value: Binding(get: { engine.sliderPosition }, set: { engine.sliderPosition = $0 }),
+                            onDoubleClick: { engine.resetSpeed() })
+                    .help("Double-click to reset to 100%")
                     .background(alignment: .center) {
                         // 100 % mark: the slider's middle
                         Rectangle()
@@ -287,6 +289,44 @@ struct EditableReadout: View {
             .trimmingCharacters(in: .whitespaces)
         if let v = Double(cleaned) { onCommit(v) }
         editing = false
+    }
+}
+
+/// Native slider (-1...1, 100 % in the middle) that resets on double-click. SwiftUI's Slider
+/// swallows mouse events, so double-clicks are caught in an NSSlider subclass instead.
+struct SpeedSlider: NSViewRepresentable {
+    @Binding var value: Double
+    let onDoubleClick: () -> Void
+
+    final class ResettableSlider: NSSlider {
+        var onDoubleClick: (() -> Void)?
+        override func mouseDown(with event: NSEvent) {
+            if event.clickCount == 2 { onDoubleClick?(); return }
+            super.mouseDown(with: event)
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var parent: SpeedSlider
+        init(_ parent: SpeedSlider) { self.parent = parent }
+        @objc func changed(_ sender: NSSlider) { parent.value = sender.doubleValue }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> ResettableSlider {
+        let slider = ResettableSlider(value: value, minValue: -1, maxValue: 1,
+                                      target: context.coordinator, action: #selector(Coordinator.changed(_:)))
+        slider.isContinuous = true
+        slider.controlSize = .regular
+        slider.onDoubleClick = onDoubleClick
+        return slider
+    }
+
+    func updateNSView(_ slider: ResettableSlider, context: Context) {
+        context.coordinator.parent = self
+        slider.onDoubleClick = onDoubleClick
+        if abs(slider.doubleValue - value) > 1e-9 { slider.doubleValue = value }
     }
 }
 
