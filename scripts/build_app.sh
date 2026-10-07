@@ -8,7 +8,8 @@ OBJ="$ROOT/build/app_obj"
 APP="$ROOT/build/Varispeed.app"
 mkdir -p "$OBJ"
 
-CFLAGS=(-O2 -Wall -target arm64-apple-macos13.0 -DHAVE_CONFIG_H -I"$ROOT/third_party/libsamplerate")
+ARCH="${ARCH:-$(uname -m)}"
+CFLAGS=(-O2 -Wall -target "$ARCH-apple-macos13.0" -DHAVE_CONFIG_H -I"$ROOT/third_party/libsamplerate")
 C_SOURCES=(
   bridge/VSBridge.c bridge/VSRecorder.c app/Sources/VSControl.c
   third_party/libsamplerate/samplerate.c third_party/libsamplerate/src_linear.c
@@ -21,7 +22,7 @@ for src in "${C_SOURCES[@]}"; do
   OBJECTS+=("$o")
 done
 
-swiftc -O -target arm64-apple-macos13.0 -parse-as-library \
+swiftc -O -target "$ARCH-apple-macos13.0" -parse-as-library \
   -import-objc-header "$ROOT/app/Sources/Bridging.h" \
   "$ROOT"/app/Sources/*.swift "${OBJECTS[@]}" \
   -framework CoreAudio -framework AVFoundation -framework SwiftUI -framework AppKit \

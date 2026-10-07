@@ -3,6 +3,11 @@
   
  Copyright (C) 2019 Existential Audio Inc.
   
+ MODIFIED for Varispeed (2026): this file was changed from the original BlackHole source.
+ Changes include a variable-speed device clock (speed ratio, glides, published ramp curve),
+ custom Varispeed properties, a raw clock algorithm, unique device identities, a shorter
+ zero-timestamp period, and removal of BlackHole branding. Licensed under GPL-3.0 as before.
+ Varispeed is not affiliated with or endorsed by Existential Audio Inc.
 */
 /*==================================================================================================
 	BlackHole.c
@@ -238,7 +243,7 @@ struct ObjectInfo {
 #endif
 
 #ifndef kManufacturer_Name
-#define                             kManufacturer_Name                  "Varispeed (BlackHole fork)"
+#define                             kManufacturer_Name                  "Varispeed"
 #endif
 
 #ifndef kLatency_Frame_Size
@@ -2039,7 +2044,7 @@ static OSStatus	BlackHole_GetBoxPropertyData(AudioServerPlugInDriverRef inDriver
 		case kAudioObjectPropertyManufacturer:
 			//	This is the human readable name of the maker of the box.
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetBoxPropertyData: not enough space for the return value of kAudioObjectPropertyManufacturer for the box");
-			*((CFStringRef*)outData) = CFSTR("Varispeed (BlackHole fork)");
+			*((CFStringRef*)outData) = CFSTR("Varispeed");
 			*outDataSize = sizeof(CFStringRef);
 			break;
 			
@@ -2225,7 +2230,7 @@ static OSStatus	BlackHole_SetBoxPropertyData(AudioServerPlugInDriverRef inDriver
 			//	of this property should only send the notification if the hardware wants the app to
 			//	flash it's UI for the device.
 			{
-				syslog(LOG_NOTICE, "The identify property has been set on the Box implemented by the BlackHole driver.");
+				syslog(LOG_NOTICE, "The identify property has been set on the Varispeed box.");
 				FailWithAction(inDataSize != sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_SetBoxPropertyData: wrong size for the data for kAudioObjectPropertyIdentify");
 				dispatch_after(dispatch_time(0, 2ULL * 1000ULL * 1000ULL * 1000ULL), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),	^()
 																																		{
@@ -2314,7 +2319,6 @@ static Boolean	BlackHole_HasDeviceProperty(AudioServerPlugInDriverRef inDriver, 
 		case kAudioDevicePropertyAvailableNominalSampleRates:
 		case kAudioDevicePropertyIsHidden:
 		case kAudioDevicePropertyZeroTimeStampPeriod:
-		case kAudioDevicePropertyIcon:
 		case kAudioDevicePropertyStreams:
 		case kAudioObjectPropertyCustomPropertyInfoList:
 		case kVarispeedProperty_TargetSpeed:

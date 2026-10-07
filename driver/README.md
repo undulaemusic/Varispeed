@@ -1,3 +1,7 @@
+> **Note from Varispeed:** this folder is a *modified* copy of BlackHole, adapted for Varispeed.
+> Don't follow the installation instructions below. Install Varispeed with `install.sh` in the
+> top folder instead. The original BlackHole README follows, unchanged.
+
 ![BlackHole: Audio Loopback Driver](Images/blackhole-banner-830px.png)
 
 # BlackHole: Audio Loopback Driver

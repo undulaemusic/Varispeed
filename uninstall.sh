@@ -1,18 +1,18 @@
 #!/bin/bash
-# Removes Varispeed.driver and restarts Core Audio. Touches nothing else.
+# Removes Varispeed completely: the driver, the app and its settings, then restarts Core Audio.
+# Your recordings are never deleted.
 set -euo pipefail
-DEST="/Library/Audio/Plug-Ins/HAL/Varispeed.driver"
+DRV_DEST="/Library/Audio/Plug-Ins/HAL/Varispeed.driver"
 
-if [ -d "$DEST" ]; then
-  echo "Removing Varispeed driver (needs your Mac password)."
-  sudo rm -rf "$DEST"
-  echo "Restarting Core Audio. All audio will cut out for a few seconds."
+osascript -e 'quit app id "com.undulaemusic.Varispeed"' >/dev/null 2>&1 || true
+rm -rf "/Applications/Varispeed.app" 2>/dev/null || sudo rm -rf "/Applications/Varispeed.app"
+defaults delete com.undulaemusic.Varispeed >/dev/null 2>&1 || true
+rm -f "$HOME/Library/Preferences/com.undulaemusic.Varispeed.plist"
+
+if [ -d "$DRV_DEST" ]; then
+  echo "Removing the Varispeed driver (macOS will ask for your password)."
+  echo "Core Audio restarts afterwards: all audio stops for a few seconds."
+  sudo rm -rf "$DRV_DEST"
   sudo killall coreaudiod 2>/dev/null || sudo launchctl kickstart -kp system/com.apple.audio.coreaudiod
 fi
-
-# Remove the menu bar app and its settings if they were installed.
-rm -rf "/Applications/Varispeed.app" 2>/dev/null || true
-defaults delete com.undulaemusic.Varispeed 2>/dev/null || true
-rm -f "$HOME/Library/Preferences/com.undulaemusic.Varispeed.plist" \
-      "$HOME/Library/Preferences/com.undulaemusic.Varispeed.plist" 2>/dev/null || true   # pre-rename settings
-echo "Varispeed is fully removed."
+echo "Varispeed is fully removed. (Your recordings were left where they are.)"
