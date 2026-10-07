@@ -77,10 +77,17 @@ struct MenuView: View {
                         .help(st < 0 ? "Down \(Int(-st)) semitone\(st == -1 ? "" : "s")" : "Up \(Int(st)) semitone\(st == 1 ? "" : "s")")
                 }
                 Spacer()
-                PercentField { engine.setPercent($0) }
                 Button("100%") { engine.resetSpeed() }
                     .controlSize(.small)
                     .keyboardShortcut("0")
+            }
+            .disabled(!engine.driverInstalled)
+
+            HStack(spacing: 10) {
+                Text("Set").font(.callout)
+                ValueField(unit: "%", help: "Type a speed in percent (25 to 200) and press Return") { engine.setPercent($0) }
+                ValueField(unit: "st", help: "Type semitones (−24 to +12) and press Return") { engine.setSemitones($0) }
+                Spacer()
             }
             .disabled(!engine.driverInstalled)
 
@@ -209,28 +216,35 @@ struct TakeRow: View {
     }
 }
 
-/// Type a speed in percent and press Return.
-struct PercentField: View {
+/// A small box: type a number and press Return. Accepts a leading + or − (including the
+/// typographic minus), a trailing unit, and a comma as decimal point.
+struct ValueField: View {
+    let unit: String
+    let help: String
     let onCommit: (Double) -> Void
     @State private var text = ""
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 2) {
-            TextField("%", text: $text)
+        HStack(spacing: 3) {
+            TextField(unit, text: $text)
                 .textFieldStyle(.roundedBorder)
                 .controlSize(.small)
                 .multilineTextAlignment(.trailing)
                 .frame(width: 52)
                 .focused($focused)
                 .onSubmit(commit)
-                .help("Type a speed in percent (25 to 200) and press Return")
-            Text("%").font(.caption).foregroundStyle(.secondary)
+                .help(help)
+            Text(unit).font(.caption).foregroundStyle(.secondary)
         }
     }
 
     private func commit() {
-        let cleaned = text.replacingOccurrences(of: "%", with: "").replacingOccurrences(of: ",", with: ".")
+        let cleaned = text.lowercased()
+            .replacingOccurrences(of: unit.lowercased(), with: "")
+            .replacingOccurrences(of: "\u{2212}", with: "-")      // typographic minus
+            .replacingOccurrences(of: ",", with: ".")
+            .replacingOccurrences(of: "+", with: "")
             .trimmingCharacters(in: .whitespaces)
         if let v = Double(cleaned) { onCommit(v) }
         text = ""
