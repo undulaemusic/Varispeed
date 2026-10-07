@@ -20,13 +20,21 @@
 #define kScratchFrames         16384
 #define kChannels              2
 
-// Fill controller (all in seconds of input audio)
-#define kFillSmoothingSeconds  0.2
-#define kKp                    0.5                  // rate correction per second of fill error
-#define kKi                    0.05
-#define kMaxCorrection         0.01                 // +-1 % (about 0.17 semitones)
-#define kGapDecayPerSecond     0.5                  // remembered worst input gap decays this much per second
-#define kResyncExcessSeconds   0.04                 // fill this far above target -> drop the excess at once
+// Timeline: every input callback records (host time of its first frame, ring position).
+// The output plays the ring at position P(t - D): the input timeline delayed by D seconds.
+#define kHistory               2048                 // power of two; >= 0.6 s of 64-frame callbacks at 2x/96 kHz
+#define kHistoryMask           (kHistory - 1)
+#define kPhaseGain             0.05                 // fraction of position error corrected per output cycle
+#define kMaxPhaseCorrection    0.01                 // ... but never more than 1 % of the cycle's frames
+#define kResyncSeconds         0.03                 // position error beyond this -> jump instead of correcting
+#define kInitialDelay          0.015
+#define kMinDelay              0.002
+#define kMaxDelay              0.2
+#define kLowSlackSeconds       0.001                // spare input below this -> lengthen D a little
+#define kDelayStepUp           0.001
+#define kDelayDecayPerSecond   0.001                // shorten D this fast while there's plenty of slack
+#define kDecaySlackSeconds     0.003
+#define kSlackWindowSeconds    2.0
 
 struct VSBridge {
     VSBridgeConfig config;
@@ -43,15 +51,19 @@ struct VSBridge {
     // input side -> output side
     _Atomic double inNominalRate, outNominalRate;
     _Atomic double inRateScalar;                    // HAL rate scalar of Varispeed (= 1/speed)
-    _Atomic uint64_t lastInputHostTime;
-    _Atomic double lastInputGapSeconds;
+    uint64_t histHost[kHistory], histPos[kHistory]; // written by input thread, published by histCount
+    _Atomic uint64_t histCount;
     _Atomic bool resetRequested;
 
     // output-thread state
     SRC_STATE *src;
     float *srcIn, *srcOut;
-    bool priming;
-    double fillErrLP, integral, worstGap, lastRatio;
+    bool primed;
+    double playPos;                                 // input frames the resampler has been told to consume (exact,
+                                                    // unlike readPos, which runs ahead by libsamplerate's buffering)
+    double delay;                                   // D, seconds
+    double minSlack, slackWindowStart;              // smallest spare input (s) seen in this window
+    double lastStepUpTime, clock;                   // output-thread time in seconds (sum of cycles)
     double hostTicksPerSecond;
     float glitchX1, glitchX2, glitchPeak;
     int glitchWarmup;
@@ -60,7 +72,7 @@ struct VSBridge {
     double resamplerDelayInputFrames;
 
     // stats (written by IO threads, read by anyone)
-    _Atomic double statInRealRate, statOutRealRate, statFillSeconds, statTargetSeconds, statCorrection, statCpu;
+    _Atomic double statInRealRate, statOutRealRate, statFillSeconds, statTargetSeconds, statCorrection, statCpu, statSpeed;
     _Atomic uint64_t underruns, overflows, glitches, inputGlitches, resets, resyncs, inputCycles, outputCycles;
 
     // output channel mapping, fixed at start
@@ -205,10 +217,6 @@ static OSStatus InputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const 
     if (inTime->mFlags & kAudioTimeStampRateScalarValid && inTime->mRateScalar > 0)
         atomic_store_explicit(&b->inRateScalar, inTime->mRateScalar, memory_order_relaxed);
 
-    uint64_t nowTicks = mach_absolute_time();
-    uint64_t last = atomic_exchange_explicit(&b->lastInputHostTime, nowTicks, memory_order_relaxed);
-    if (last) atomic_store_explicit(&b->lastInputGapSeconds, (double)(nowTicks - last) / b->hostTicksPerSecond, memory_order_relaxed);
-
     uint64_t w = atomic_load_explicit(&b->writePos, memory_order_relaxed);
     uint64_t r = atomic_load_explicit(&b->readPos, memory_order_acquire);
     if (kRingFrames - (w - r) < frames) {
@@ -219,6 +227,13 @@ static OSStatus InputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const 
             dst[0] = src[i * ch];
             dst[1] = src[i * ch + (ch > 1 ? 1 : 0)];
         }
+        // record where this buffer sits on the Varispeed timeline, then publish the frames
+        if (inTime->mFlags & kAudioTimeStampHostTimeValid) {
+            uint64_t n = atomic_load_explicit(&b->histCount, memory_order_relaxed);
+            b->histHost[n & kHistoryMask] = inTime->mHostTime;
+            b->histPos[n & kHistoryMask] = w;
+            atomic_store_explicit(&b->histCount, n + 1, memory_order_release);
+        }
         atomic_store_explicit(&b->writePos, w + frames, memory_order_release);
     }
     DetectGlitches((GlitchState){ &b->inGlitchX1, &b->inGlitchX2, &b->inGlitchPeak, &b->inGlitchWarmup, &b->inputGlitches },
@@ -227,12 +242,32 @@ static OSStatus InputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const 
     return noErr;
 }
 
+// Ring position that the Varispeed timeline had reached at host time t (interpolated between
+// input callbacks, extrapolated past the newest one). False if t is older than the history.
+static bool PositionAt(VSBridge *b, double t, double inRate, double *outPos) {
+    uint64_t n = atomic_load_explicit(&b->histCount, memory_order_acquire);
+    if (n < 2) return false;
+    uint64_t newest = n - 1, oldest = n > kHistory - 16 ? n - (kHistory - 16) : 0;
+    double tNew = (double)b->histHost[newest & kHistoryMask];
+    if (t >= tNew) {
+        *outPos = (double)b->histPos[newest & kHistoryMask] + (t - tNew) / b->hostTicksPerSecond * inRate;
+        return true;
+    }
+    if (t < (double)b->histHost[oldest & kHistoryMask]) return false;
+    uint64_t lo = oldest, hi = newest;               // invariant: host[lo] <= t < host[hi]
+    while (hi - lo > 1) {
+        uint64_t mid = lo + (hi - lo) / 2;
+        if ((double)b->histHost[mid & kHistoryMask] <= t) lo = mid; else hi = mid;
+    }
+    double h0 = (double)b->histHost[lo & kHistoryMask], h1 = (double)b->histHost[hi & kHistoryMask];
+    double p0 = (double)b->histPos[lo & kHistoryMask], p1 = (double)b->histPos[hi & kHistoryMask];
+    *outPos = h1 > h0 ? p0 + (p1 - p0) * (t - h0) / (h1 - h0) : p0;
+    return true;
+}
+
 static void Reset(VSBridge *b) {
     src_reset(b->src);
-    atomic_store_explicit(&b->readPos, atomic_load_explicit(&b->writePos, memory_order_acquire), memory_order_release);
-    b->priming = true;
-    b->fillErrLP = 0;
-    b->integral = 0;
+    b->primed = false;
     b->glitchWarmup = 4096;
     atomic_fetch_add_explicit(&b->resets, 1, memory_order_relaxed);
 }
@@ -240,7 +275,7 @@ static void Reset(VSBridge *b) {
 static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const AudioBufferList *in, const AudioTimeStamp *inTime,
                              AudioBufferList *out, const AudioTimeStamp *outTime, void *ctx) {
     VSBridge *b = ctx;
-    uint64_t t0 = mach_absolute_time();
+    uint64_t t0Ticks = mach_absolute_time();
     if (!out || out->mNumberBuffers == 0) return noErr;
     UInt32 frames = out->mBuffers[0].mDataByteSize / (UInt32)(sizeof(float) * (out->mBuffers[0].mNumberChannels ? out->mBuffers[0].mNumberChannels : 1));
     if (frames > kScratchFrames) frames = kScratchFrames;
@@ -248,66 +283,74 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
 
     if (atomic_exchange_explicit(&b->resetRequested, false, memory_order_acq_rel)) Reset(b);
 
-    // --- feed-forward rates (frames per real second)
     double inNominal = atomic_load_explicit(&b->inNominalRate, memory_order_relaxed);
     double outNominal = atomic_load_explicit(&b->outNominalRate, memory_order_relaxed);
     double inRate = inNominal / atomic_load_explicit(&b->inRateScalar, memory_order_relaxed);
     double outScalar = (outTime->mFlags & kAudioTimeStampRateScalarValid && outTime->mRateScalar > 0) ? outTime->mRateScalar : 1.0;
     double outRate = outNominal / outScalar;
     double dt = frames / outRate;
+    b->clock += dt;
 
-    // --- target fill: cover the worst recent gap between input chunks, one output cycle, and a margin
-    double gap = atomic_load_explicit(&b->lastInputGapSeconds, memory_order_relaxed);
-    b->worstGap *= pow(kGapDecayPerSecond, dt);
-    if (gap > b->worstGap) b->worstGap = gap;
-    double targetSeconds = b->worstGap + dt + b->config.safetyMarginMs / 1000.0;
-
-    uint64_t w = atomic_load_explicit(&b->writePos, memory_order_acquire);
-    uint64_t r = atomic_load_explicit(&b->readPos, memory_order_relaxed);
-    double fillSeconds = (double)(w - r) / inRate;
+    // host times at which this output buffer starts and ends
+    double tStart = (outTime->mFlags & kAudioTimeStampHostTimeValid) ? (double)outTime->mHostTime : (double)t0Ticks;
+    double tEnd = tStart + dt * b->hostTicksPerSecond;
+    double ticksD = b->delay * b->hostTicksPerSecond;
 
     float *res = b->srcOut;
     UInt32 produced = 0;
+    double p0, p1;
+    uint64_t w = atomic_load_explicit(&b->writePos, memory_order_acquire);
+    uint64_t r = atomic_load_explicit(&b->readPos, memory_order_relaxed);
 
-    // Too much audio queued (output started late, or input burst): drop the excess in one go
-    // rather than slowly draining it with an audible pitch correction.
-    if (fillSeconds > targetSeconds + (b->priming ? 0.005 : kResyncExcessSeconds)) {
-        uint64_t keep = (uint64_t)(targetSeconds * inRate);
-        r = w - keep;
-        atomic_store_explicit(&b->readPos, r, memory_order_release);
-        fillSeconds = (double)keep / inRate;
-        b->fillErrLP = 0;
-        b->integral = 0;
-        if (!b->priming) atomic_fetch_add_explicit(&b->resyncs, 1, memory_order_relaxed);
-        b->glitchWarmup = 4096;
-    }
+    if (PositionAt(b, tStart - ticksD, inRate, &p0) && PositionAt(b, tEnd - ticksD, inRate, &p1) && p1 > p0) {
+        double lookahead = b->resamplerDelayInputFrames * fmax(1.0, (p1 - p0) / frames) + 8.0;
 
-    if (b->priming) {
-        if (fillSeconds >= targetSeconds) { b->priming = false; b->fillErrLP = fillSeconds - targetSeconds; b->integral = 0; }
-    }
+        // jump instead of correcting when far off (first cycle, after underruns, rate changes)
+        double err = b->playPos - p0;                      // > 0: we're ahead of the timeline
+        if (!b->primed || fabs(err) > kResyncSeconds * inRate) {
+            double minPos = (double)w - (double)(kRingFrames - 8192);
+            double target = fmax(p0, minPos);
+            if (b->primed) atomic_fetch_add_explicit(&b->resyncs, 1, memory_order_relaxed);
+            r = (uint64_t)llround(target);
+            b->playPos = (double)r;
+            err = 0;
+            b->primed = true;
+            src_reset(b->src);
+            b->glitchWarmup = 4096;
+        }
 
-    if (!b->priming) {
-        // --- PI correction on the smoothed fill error
-        double err = fillSeconds - targetSeconds;
-        b->fillErrLP += (err - b->fillErrLP) * fmin(1.0, dt / kFillSmoothingSeconds);
-        b->integral += b->fillErrLP * dt;
-        double iMax = kMaxCorrection / kKi;
-        if (b->integral > iMax) b->integral = iMax;
-        if (b->integral < -iMax) b->integral = -iMax;
-        double corr = kKp * b->fillErrLP + kKi * b->integral;
-        if (corr > kMaxCorrection) corr = kMaxCorrection;
-        if (corr < -kMaxCorrection) corr = -kMaxCorrection;
-        atomic_store_explicit(&b->statCorrection, corr, memory_order_relaxed);
-
-        double ratio = outRate / (inRate * (1.0 + corr));
+        // consume the timeline's span for this buffer, nudged to remove the position error
+        double span = p1 - p0;
+        double nudge = kPhaseGain * err;
+        double maxNudge = kMaxPhaseCorrection * span;
+        if (nudge > maxNudge) nudge = maxNudge;
+        if (nudge < -maxNudge) nudge = -maxNudge;
+        double inFrames = span - nudge;
+        double ratio = frames / inFrames;
         if (ratio < 1.0 / 256.0) ratio = 1.0 / 256.0;
         if (ratio > 256.0) ratio = 256.0;
-        b->lastRatio = ratio;
+        atomic_store_explicit(&b->statCorrection, -nudge / span, memory_order_relaxed);
 
-        // --- resample until this output buffer is full
+        // how much spare input is there beyond what this cycle needs?
+        double slack = ((double)w - (b->playPos + inFrames + lookahead)) / inRate;
+        b->playPos += inFrames;
+        if (b->clock - b->slackWindowStart > kSlackWindowSeconds) {
+            if (b->minSlack > kDecaySlackSeconds) b->delay -= kDelayDecayPerSecond * kSlackWindowSeconds;
+            b->minSlack = slack;
+            b->slackWindowStart = b->clock;
+        } else if (slack < b->minSlack) {
+            b->minSlack = slack;
+        }
+        if (slack < kLowSlackSeconds && b->clock - b->lastStepUpTime > 0.05) {
+            b->delay += kDelayStepUp - fmin(0.0, slack);   // an underrun also adds the shortfall
+            b->lastStepUpTime = b->clock;
+        }
+        if (b->delay < kMinDelay) b->delay = kMinDelay;
+        if (b->delay > kMaxDelay) b->delay = kMaxDelay;
+
         for (int guard = 0; produced < frames && guard < 16; guard++) {
             w = atomic_load_explicit(&b->writePos, memory_order_acquire);
-            uint64_t avail = w - r;
+            uint64_t avail = w > r ? w - r : 0;
             uint64_t want = (uint64_t)ceil((frames - produced) / ratio) + 8;
             uint64_t n = avail < want ? avail : want;
             if (n > kScratchFrames) n = kScratchFrames;
@@ -327,17 +370,13 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
             if (d.input_frames_used == 0 && d.output_frames_gen == 0) break;   // starved
         }
         atomic_store_explicit(&b->readPos, r, memory_order_release);
-
-        if (produced < frames) {
-            atomic_fetch_add_explicit(&b->underruns, 1, memory_order_relaxed);
-            b->priming = true;
-        }
+        if (produced < frames) atomic_fetch_add_explicit(&b->underruns, 1, memory_order_relaxed);
+        atomic_store_explicit(&b->statSpeed, span / dt / inNominal, memory_order_relaxed);
     }
     if (produced < frames) memset(res + produced * kChannels, 0, (frames - produced) * kChannels * sizeof(float));
 
     DetectGlitches((GlitchState){ &b->glitchX1, &b->glitchX2, &b->glitchPeak, &b->glitchWarmup, &b->glitches }, res, frames, kChannels, outNominal);
 
-    // --- write to the chosen output channels
     if (!b->config.muteOutput) {
         for (int c = 0; c < kChannels; c++) {
             if (!b->outMap[c].valid || b->outMap[c].buffer >= out->mNumberBuffers) continue;
@@ -349,9 +388,9 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
 
     atomic_store_explicit(&b->statInRealRate, inRate, memory_order_relaxed);
     atomic_store_explicit(&b->statOutRealRate, outRate, memory_order_relaxed);
-    atomic_store_explicit(&b->statFillSeconds, b->priming ? fillSeconds : b->fillErrLP + targetSeconds, memory_order_relaxed);
-    atomic_store_explicit(&b->statTargetSeconds, targetSeconds, memory_order_relaxed);
-    atomic_store_explicit(&b->statCpu, (double)(mach_absolute_time() - t0) / b->hostTicksPerSecond / dt, memory_order_relaxed);
+    atomic_store_explicit(&b->statFillSeconds, ((double)w - b->playPos) / inRate, memory_order_relaxed);
+    atomic_store_explicit(&b->statTargetSeconds, b->delay, memory_order_relaxed);
+    atomic_store_explicit(&b->statCpu, (double)(mach_absolute_time() - t0Ticks) / b->hostTicksPerSecond / dt, memory_order_relaxed);
     return noErr;
 }
 
@@ -453,11 +492,12 @@ bool VSBridgeStart(VSBridge *b) {
 
     atomic_store(&b->writePos, 0);
     atomic_store(&b->readPos, 0);
-    atomic_store(&b->lastInputHostTime, 0);
-    atomic_store(&b->lastInputGapSeconds, 0);
-    b->worstGap = 0;
+    atomic_store(&b->histCount, 0);
     src_reset(b->src);
-    b->priming = true;
+    b->primed = false;
+    b->delay = kInitialDelay;
+    b->minSlack = 1.0;
+    b->clock = b->slackWindowStart = b->lastStepUpTime = 0;
     b->glitchWarmup = 4096;
 
     if (AudioDeviceCreateIOProcID(b->inDevice, InputIOProc, b, &b->inProc) != noErr) return Fail(b, "Can't open Varispeed input");
@@ -508,13 +548,12 @@ void VSBridgeGetStats(VSBridge *b, VSBridgeStats *s) {
     s->outputSampleRate = atomic_load(&b->outNominalRate);
     s->inputRealRate = atomic_load(&b->statInRealRate);
     s->outputRealRate = atomic_load(&b->statOutRealRate);
-    s->speed = s->inputSampleRate > 0 ? s->inputRealRate / s->inputSampleRate : 0;
+    s->speed = atomic_load(&b->statSpeed);
     s->ringFillMs = atomic_load(&b->statFillSeconds) * 1000.0;
     s->targetFillMs = atomic_load(&b->statTargetSeconds) * 1000.0;
     s->correctionPPM = atomic_load(&b->statCorrection) * 1e6;
     double resamplerMs = s->inputRealRate > 0 ? b->resamplerDelayInputFrames / s->inputRealRate * 1000.0 : 0;
-    double outBufMs = s->outputSampleRate > 0 ? b->config.outputBufferFrames / s->outputSampleRate * 1000.0 : 0;
-    s->latencyMs = s->ringFillMs + resamplerMs + outBufMs;
+    s->latencyMs = s->targetFillMs + resamplerMs;
     s->outputDeviceLatencyMs = b->outputDeviceLatencySeconds * 1000.0;
     s->cpuLoad = atomic_load(&b->statCpu);
     s->underruns = atomic_load(&b->underruns);

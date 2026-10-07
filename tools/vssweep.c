@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <unistd.h>
+#include <time.h>
 
 static _Atomic uint64_t gFrames = 0, gCycles = 0, gDiscontinuities = 0, gBackwards = 0;
 static _Atomic double gLastEnd = -1, gWorstJump = 0;
@@ -114,6 +115,31 @@ int main(int argc, char **argv) {
     atomic_store(&gDiscontinuities, 0); atomic_store(&gBackwards, 0); atomic_store(&gWorstJump, 0);
 
     gStart = now_s();
+    // VS_RANDOM=N: instead of the step list, change to a random speed (0.25-2) with a random
+    // ramp every 1-6 s for N seconds, printing one summary line per minute.
+    if (getenv("VS_RANDOM")) {
+        double total = atof(getenv("VS_RANDOM")), t0 = now_s(), nextChange = 0, nextReport = 60;
+        srandom((unsigned)time(NULL));
+        int changes = 0;
+        while (now_s() - t0 < total) {
+            double t = now_s() - t0;
+            if (t >= nextChange) {
+                double sp = pow(2.0, -2.0 + 3.0 * (random() / (double)RAND_MAX));
+                double rp = (random() % 4 == 0) ? 0.0 : 3.0 * (random() / (double)RAND_MAX);
+                vs_set_double(dev, kVarispeedProperty_RampSeconds, rp);
+                vs_set_double(dev, kVarispeedProperty_TargetSpeed, sp);
+                nextChange = t + 1.0 + 5.0 * (random() / (double)RAND_MAX);
+                changes++;
+            }
+            if (t >= nextReport) {
+                printf("%4.0f min: %d speed changes, discontinuities %llu\n", t / 60, changes, (unsigned long long)atomic_load(&gDiscontinuities));
+                fflush(stdout);
+                nextReport += 60;
+            }
+            usleep(50000);
+        }
+        steps[0].speed = 1.0; steps[0].ramp = 0.5; nsteps = 1; step = 3;
+    }
     printf("%-6s %-6s %-5s | %-9s %-9s %-9s\n", "target", "ramp", "t", "driver", "measured", "discont");
     for (int s = 0; s < nsteps; s++) {
         vs_set_double(dev, kVarispeedProperty_RampSeconds, fmax(steps[s].ramp, minRamp));

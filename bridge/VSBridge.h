@@ -3,9 +3,11 @@
 //
 //   Varispeed input IOProc --> lock-free ring buffer --> libsamplerate --> output IOProc
 //
-// The resampling ratio is fed forward from both devices' HAL rate scalars (which carry the
-// varispeed ratio and the output crystal's drift), plus a slow PI correction that holds the
-// ring buffer at a target fill level so it never runs dry or overflows.
+// Each input callback records where its audio sits on the Varispeed timeline (host time ->
+// ring position). The output plays that timeline delayed by a fixed D seconds, so the
+// resampling ratio for each output buffer is simply (timeline frames spanned) / (output
+// frames), which follows speed changes and both devices' clock drift exactly. A small
+// correction removes accumulated position error; D adapts to the smallest safe value.
 #ifndef VSBridge_h
 #define VSBridge_h
 
@@ -39,10 +41,10 @@ typedef struct {
     double inputSampleRate, outputSampleRate;   // nominal
     double inputRealRate, outputRealRate;       // frames per real second (from rate scalars)
     double speed;                               // inputRealRate / inputSampleRate
-    double ringFillMs;                          // smoothed, in real time
-    double targetFillMs;
-    double correctionPPM;                       // PI correction applied on top of the feed-forward ratio
-    double latencyMs;                           // ring + resampler + output buffer (bridge-added)
+    double ringFillMs;                          // audio queued in the ring, in real time
+    double targetFillMs;                        // D: how far behind the Varispeed timeline the output plays
+    double correctionPPM;                       // position-error correction applied this cycle
+    double latencyMs;                           // bridge-added: D + resampler delay
     double outputDeviceLatencyMs;               // output device's own latency + safety offset
     double cpuLoad;                             // fraction of the output IO cycle spent in the bridge
     uint64_t underruns, overflows, resets, resyncs;
