@@ -34,7 +34,7 @@ struct MenuView: View {
             Circle()
                 .fill(engine.bridgeRunning ? Color.green : Color.secondary.opacity(0.4))
                 .frame(width: 8, height: 8)
-            Text(engine.bridgeRunning ? "Audio passthrough" : "Audio passthrough off")
+            Text(engine.bridgeRunning ? "Audio passthrough on" : "Audio passthrough off")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
