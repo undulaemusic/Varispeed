@@ -4,11 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define kVarispeedUID "Varispeed_UID"
 
 AudioObjectID VSControlVarispeedDevice(void) {
     AudioObjectPropertyAddress a = { kAudioHardwarePropertyTranslateUIDToDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-    CFStringRef uid = CFSTR(kVarispeedUID);
+    CFStringRef uid = CFSTR(kVarispeed_DeviceUID);
     AudioObjectID dev = kAudioObjectUnknown;
     UInt32 size = sizeof(dev);
     if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, sizeof(uid), &uid, &size, &dev) != noErr) return kAudioObjectUnknown;
@@ -62,7 +61,7 @@ int VSControlListOutputDevices(VSOutputDevice *devices, int max) {
     for (UInt32 i = 0; i < size / sizeof(AudioObjectID) && count < max; i++) {
         VSOutputDevice *d = &devices[count];
         if (!CopyString(ids[i], kAudioDevicePropertyDeviceUID, d->uid, sizeof d->uid)) continue;
-        if (!strcmp(d->uid, kVarispeedUID) || !strcmp(d->uid, "Varispeed_2_UID")) continue;
+        if (!strcmp(d->uid, kVarispeed_DeviceUID) || !strcmp(d->uid, kVarispeed_Device2UID)) continue;
         if (!CopyString(ids[i], kAudioObjectPropertyName, d->name, sizeof d->name)) continue;
         AudioObjectPropertyAddress sa = { kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain };
         UInt32 bs = 0;

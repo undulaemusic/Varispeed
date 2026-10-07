@@ -7,7 +7,6 @@
 #include <string.h>
 #include "../driver/BlackHole/VarispeedProperties.h"
 
-#define kVarispeed_DeviceUID "Varispeed_UID"
 
 static inline AudioObjectID vs_find_device_by_uid(const char *uid) {
     AudioObjectPropertyAddress a = { kAudioHardwarePropertyTranslateUIDToDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };

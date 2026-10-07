@@ -185,10 +185,11 @@ struct ObjectInfo {
 
 
 #else
-#define                             kBox_UID                            kDriver_Name "_UID"
-#define                             kDevice_UID                         kDriver_Name "_UID"
-#define                             kDevice2_UID                        kDriver_Name "_2_UID"
-#define                             kDevice_ModelUID                    kDriver_Name "_ModelUID"
+// Varispeed: unique reverse-DNS identities from VarispeedProperties.h
+#define                             kBox_UID                            kVarispeed_BoxUID
+#define                             kDevice_UID                         kVarispeed_DeviceUID
+#define                             kDevice2_UID                        kVarispeed_Device2UID
+#define                             kDevice_ModelUID                    kVarispeed_ModelUID
 
 
 #ifndef kDevice_Name

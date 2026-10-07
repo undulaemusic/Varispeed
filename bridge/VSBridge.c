@@ -16,7 +16,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define kVarispeedUID          "Varispeed_UID"
 #define kRingFrames            (1u << 16)          // power of two; ~0.3 s even at 2x / 96 kHz
 #define kRingMask              (kRingFrames - 1)
 #define kScratchFrames         16384
@@ -545,7 +544,7 @@ bool VSBridgeStart(VSBridge *b) {
     atomic_store(&b->lastError, NULL);
     if (!b->src) return Fail(b, "Could not create the resampler");
 
-    b->inDevice = DeviceForUID(kVarispeedUID);
+    b->inDevice = DeviceForUID(kVarispeed_DeviceUID);
     if (!b->inDevice) return Fail(b, "Varispeed device not found (is the driver installed?)");
     b->outDevice = b->outputUID[0] ? DeviceForUID(b->outputUID) : DefaultOutputDevice(b->outputUID, sizeof b->outputUID);
     if (!b->outDevice) return Fail(b, "Output device not found");

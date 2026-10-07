@@ -23,6 +23,13 @@
 // Max semitones the speed may fall per zero-timestamp period (applies to the next change).
 #define kVarispeedProperty_DebugMaxFall         0x76736d66 /* 'vsmf' */
 
+// Core Audio identities. Unique so Varispeed never collides with another device on the Mac.
+// Changing these makes DAWs treat Varispeed as a new device (users re-select it once).
+#define kVarispeed_DeviceUID             "com.undulaemusic.Varispeed.device"
+#define kVarispeed_Device2UID            "com.undulaemusic.Varispeed.device2"   // hidden mirror device
+#define kVarispeed_ModelUID              "com.undulaemusic.Varispeed.model"
+#define kVarispeed_BoxUID                "com.undulaemusic.Varispeed.box"
+
 #define kVarispeed_MinSpeed              0.5
 #define kVarispeed_MaxSpeed              2.0
 #define kVarispeed_MaxRampSeconds        30.0
