@@ -308,7 +308,12 @@ static Float64                      gDevice_AnchorSampleTime            = 0.0;
 // Even an "instant" change glides over at least this long. Large unannounced rate jumps
 // (e.g. 2x -> 0.25x) can make the HAL abandon the device's clock until IO restarts.
 #ifndef kVarispeed_MinRampSeconds
-#define                             kVarispeed_MinRampSeconds           0.05
+#define                             kVarispeed_MinRampSeconds           0.1
+#endif
+// Speeding up faster than this makes the HAL's rate estimate lag far enough that it wakes
+// late and skips ahead (a sample-time discontinuity). Measured safe limit ~32 st/s.
+#ifndef kVarispeed_MaxRiseSemitonesPerSecond
+#define                             kVarispeed_MaxRiseSemitonesPerSecond 24.0
 #endif
 #ifndef kVarispeed_DefaultRampSeconds
 #define                             kVarispeed_DefaultRampSeconds       0.5
@@ -3069,7 +3074,11 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 					UInt64 theNow = mach_absolute_time();
 					gVarispeed_RampFromSpeed = Varispeed_SpeedAt(theNow);
 					gVarispeed_RampStartHostTime = theNow;
-					gVarispeed_RampTicks = fmax(gVarispeed_RampSeconds, kVarispeed_MinRampSeconds) * gHostTicksPerSecond;
+					Float64 theRampSeconds = fmax(gVarispeed_RampSeconds, kVarispeed_MinRampSeconds);
+					if (theNewSpeed > gVarispeed_RampFromSpeed) {
+						theRampSeconds = fmax(theRampSeconds, 12.0 * log2(theNewSpeed / gVarispeed_RampFromSpeed) / kVarispeed_MaxRiseSemitonesPerSecond);
+					}
+					gVarispeed_RampTicks = theRampSeconds * gHostTicksPerSecond;
 					gVarispeed_TargetSpeed = theNewSpeed;
 					outChangedAddresses[*outNumberPropertiesChanged] = *inAddress;
 					*outNumberPropertiesChanged += 1;

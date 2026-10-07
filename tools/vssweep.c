@@ -15,6 +15,9 @@
 static _Atomic uint64_t gFrames = 0, gCycles = 0, gDiscontinuities = 0, gBackwards = 0;
 static _Atomic double gLastEnd = -1, gWorstJump = 0;
 static double gPhase = 0, gRate = 48000;
+// discontinuity log (written only by the IO thread, read after stop)
+typedef struct { uint64_t host; double sampleTime, jump; UInt32 frames; } JumpEvent;
+static JumpEvent gEvents[256]; static _Atomic int gNumEvents = 0;
 
 static OSStatus ioProc(AudioObjectID dev, const AudioTimeStamp *now, const AudioBufferList *in, const AudioTimeStamp *inTime,
                        AudioBufferList *out, const AudioTimeStamp *outTime, void *ctx) {
@@ -27,6 +30,8 @@ static OSStatus ioProc(AudioObjectID dev, const AudioTimeStamp *now, const Audio
                 atomic_fetch_add(&gDiscontinuities, 1);
                 if (jump < 0) atomic_fetch_add(&gBackwards, 1);
                 if (fabs(jump) > fabs(atomic_load(&gWorstJump))) atomic_store(&gWorstJump, jump);
+                int n = atomic_load(&gNumEvents);
+                if (n < 256) { gEvents[n] = (JumpEvent){ inTime->mHostTime, inTime->mSampleTime, jump, frames }; atomic_store(&gNumEvents, n + 1); }
             }
         }
         atomic_store(&gLastEnd, inTime->mSampleTime + frames);
@@ -46,6 +51,7 @@ static OSStatus ioProc(AudioObjectID dev, const AudioTimeStamp *now, const Audio
     return noErr;
 }
 
+static double gStart = 0;
 static double now_s(void) {
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     return (double)mach_absolute_time() * tb.numer / tb.denom / 1e9;
@@ -68,6 +74,9 @@ int main(int argc, char **argv) {
     vs_get_double(dev, kVarispeedProperty_DebugPeriod, &period);
     vs_get_double(dev, kVarispeedProperty_DebugClockAlgorithm, &algo);
     UInt32 ai = (UInt32)algo;
+    UInt32 bufFrames = 0; sz = sizeof(bufFrames);
+    AudioObjectPropertyAddress bfa = { kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    printf("buffer %u frames, ", (AudioObjectGetPropertyData(dev, &bfa, 0, NULL, &sz, &bufFrames), bufFrames));
     printf("zero-timestamp period %.0f frames, clock algorithm '%c%c%c%c', min ramp %.2fs, %.0f Hz\n", period,
            (char)(ai >> 24), (char)(ai >> 16), (char)(ai >> 8), (char)ai, minRamp, gRate);
 
@@ -76,21 +85,40 @@ int main(int argc, char **argv) {
         {0.25, 1.0}, {2.0, 2.0}, {0.75, 0.5}, {1.5, 0.1}, {1.0, 0.5}, // ramps
     };
     int nsteps = sizeof steps / sizeof steps[0];
+    // VS_STEPS="0.5:0,2:0.5,..." overrides the built-in step list (speed:ramp pairs)
+    if (getenv("VS_STEPS")) {
+        nsteps = 0;
+        for (char *tok = strtok(strdup(getenv("VS_STEPS")), ","); tok && nsteps < 10; tok = strtok(NULL, ","))
+            sscanf(tok, "%lf:%lf", &steps[nsteps].speed, &steps[nsteps].ramp), nsteps++;
+    }
 
     vs_set_double(dev, kVarispeedProperty_RampSeconds, 0);
     vs_set_double(dev, kVarispeedProperty_TargetSpeed, 1.0);
 
+    if (getenv("VS_BUFFER")) {
+        UInt32 frames = (UInt32)atoi(getenv("VS_BUFFER"));
+        AudioObjectPropertyAddress ba = { kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+        AudioObjectSetPropertyData(dev, &ba, 0, NULL, sizeof(frames), &frames);
+    }
+    if (getenv("VS_RATE")) {
+        Float64 r = atof(getenv("VS_RATE"));
+        AudioObjectSetPropertyData(dev, &ra, 0, NULL, sizeof(r), &r);
+        sleep(1);
+        sz = sizeof(gRate); AudioObjectGetPropertyData(dev, &ra, 0, NULL, &sz, &gRate);
+    }
     AudioDeviceIOProcID pid;
     if (AudioDeviceCreateIOProcID(dev, ioProc, NULL, &pid) != noErr) { fprintf(stderr, "IOProc failed\n"); return 1; }
     AudioDeviceStart(dev, pid);
     sleep(1);
     atomic_store(&gDiscontinuities, 0); atomic_store(&gBackwards, 0); atomic_store(&gWorstJump, 0);
 
+    gStart = now_s();
     printf("%-6s %-6s %-5s | %-9s %-9s %-9s\n", "target", "ramp", "t", "driver", "measured", "discont");
     for (int s = 0; s < nsteps; s++) {
         vs_set_double(dev, kVarispeedProperty_RampSeconds, fmax(steps[s].ramp, minRamp));
         vs_set_double(dev, kVarispeedProperty_TargetSpeed, steps[s].speed);
         double t0 = now_s();
+        if (getenv("VS_EVENTS")) printf("-- step %d: target %.3f ramp %.2f at t=%.3fs\n", s, steps[s].speed, steps[s].ramp, t0 - gStart);
         uint64_t f0 = atomic_load(&gFrames); double tw = t0;
         while (now_s() - t0 < step) {
             usleep(500000);
@@ -105,6 +133,12 @@ int main(int argc, char **argv) {
     AudioDeviceDestroyIOProcID(dev, pid);
     vs_set_double(dev, kVarispeedProperty_RampSeconds, 0.5);
     vs_set_double(dev, kVarispeedProperty_TargetSpeed, 1.0);
+    if (getenv("VS_EVENTS")) {
+        mach_timebase_info_data_t tb; mach_timebase_info(&tb);
+        for (int i = 0; i < atomic_load(&gNumEvents); i++)
+            printf("  jump %+.0f frames at sample %.0f (buffer %u) t=%.3fs\n", gEvents[i].jump, gEvents[i].sampleTime, gEvents[i].frames,
+                   (double)gEvents[i].host * tb.numer / tb.denom / 1e9 - gStart);
+    }
     printf("\nIO cycles: %llu  discontinuities: %llu  backwards: %llu  worst jump: %.1f frames\n",
            (unsigned long long)atomic_load(&gCycles), (unsigned long long)atomic_load(&gDiscontinuities),
            (unsigned long long)atomic_load(&gBackwards), atomic_load(&gWorstJump));
