@@ -62,9 +62,13 @@ final class Engine: ObservableObject {
     @Published private(set) var recordSeconds: Double = 0
     @Published private(set) var recordLevel: Double = 0
     @Published private(set) var takes: [Take] = []
+    @Published private(set) var recordingProblem: String?
 
-    static let recordingsFolder: URL = FileManager.default.urls(for: .musicDirectory, in: .userDomainMask)[0]
+    static let defaultRecordingsFolder: URL = FileManager.default.urls(for: .musicDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Varispeed Recordings", isDirectory: true)
+
+    /// Where takes are saved. Remembered between launches.
+    @Published private(set) var recordingsFolder: URL = Engine.defaultRecordingsFolder
 
     private let defaults = UserDefaults.standard
     private var varispeed: AudioObjectID?
@@ -79,6 +83,9 @@ final class Engine: ObservableObject {
         bridgeEnabled = defaults.object(forKey: "bridgeEnabled") as? Bool ?? true
         outputUID = defaults.string(forKey: "outputUID") ?? ""
         outputLeftChannel = defaults.object(forKey: "outputLeftChannel") as? Int ?? 0
+        if let path = defaults.string(forKey: "recordingsFolder") {
+            recordingsFolder = URL(fileURLWithPath: path, isDirectory: true)
+        }
 
         refreshDevices()
         connectDriver()
@@ -286,14 +293,22 @@ final class Engine: ObservableObject {
         guard let b = bridge, let rec = recorder, !isSaving else { return }
         var stats = VSBridgeStats()
         VSBridgeGetStats(b, &stats)
-        try? FileManager.default.createDirectory(at: Self.recordingsFolder, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: recordingsFolder, withIntermediateDirectories: true)
+        } catch {
+            recordingProblem = "Can't use the recording folder (is the drive connected?). Choose another one."
+            return
+        }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        let url = Self.recordingsFolder.appendingPathComponent("Varispeed \(formatter.string(from: Date())).wav")
+        let url = recordingsFolder.appendingPathComponent("Varispeed \(formatter.string(from: Date())).wav")
         if VSRecorderStart(rec, url.path, stats.outputSampleRate) {
             recordingURL = url
+            recordingProblem = nil
             isRecording = true
             recordSeconds = 0
+        } else {
+            recordingProblem = "Can't write to the recording folder. Choose another one."
         }
     }
 
@@ -316,7 +331,7 @@ final class Engine: ObservableObject {
 
     func loadTakes() {
         let fm = FileManager.default
-        let urls = (try? fm.contentsOfDirectory(at: Self.recordingsFolder, includingPropertiesForKeys: [.creationDateKey, .fileSizeKey])) ?? []
+        let urls = (try? fm.contentsOfDirectory(at: recordingsFolder, includingPropertiesForKeys: [.creationDateKey, .fileSizeKey])) ?? []
         takes = urls.filter { $0.pathExtension.lowercased() == "wav" }
             .compactMap { url -> Take? in
                 let values = try? url.resourceValues(forKeys: [.creationDateKey, .fileSizeKey])
@@ -337,12 +352,40 @@ final class Engine: ObservableObject {
     }
 
     func revealRecordings() {
-        try? FileManager.default.createDirectory(at: Self.recordingsFolder, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: recordingsFolder, withIntermediateDirectories: true)
         if let latest = takes.first {
             NSWorkspace.shared.activateFileViewerSelecting([latest.url])
         } else {
-            NSWorkspace.shared.open(Self.recordingsFolder)
+            NSWorkspace.shared.open(recordingsFolder)
         }
+    }
+
+    /// Lets the user pick where takes are saved (standard folder picker; can create folders).
+    func chooseRecordingsFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose where Varispeed saves recordings"
+        panel.prompt = "Use This Folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = recordingsFolder
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        setRecordingsFolder(url)
+    }
+
+    func resetRecordingsFolder() { setRecordingsFolder(Self.defaultRecordingsFolder) }
+
+    private func setRecordingsFolder(_ url: URL) {
+        recordingsFolder = url
+        recordingProblem = nil
+        if url == Self.defaultRecordingsFolder {
+            defaults.removeObject(forKey: "recordingsFolder")
+        } else {
+            defaults.set(url.path, forKey: "recordingsFolder")
+        }
+        loadTakes()
     }
 
     func openMicrophoneSettings() {

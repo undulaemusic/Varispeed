@@ -129,8 +129,27 @@ struct MenuView: View {
                     ForEach(engine.takes) { take in TakeRow(take: take) }
                 }
             }
-            Button("Show recordings in Finder") { engine.revealRecordings() }
+            if let problem = engine.recordingProblem {
+                Notice(text: problem, color: .orange)
+            }
+            HStack(spacing: 6) {
+                Text("Save to").font(.caption).foregroundStyle(.secondary)
+                Button(action: engine.revealRecordings) {
+                    Label(engine.recordingsFolder.lastPathComponent, systemImage: "folder")
+                        .lineLimit(1).truncationMode(.middle)
+                }
                 .buttonStyle(.link).font(.caption)
+                .help("\(engine.recordingsFolder.path) (click to show in Finder)")
+                Spacer()
+                if engine.recordingsFolder != Engine.defaultRecordingsFolder {
+                    Button("Default") { engine.resetRecordingsFolder() }
+                        .buttonStyle(.link).font(.caption)
+                        .help("Go back to Music/Varispeed Recordings")
+                }
+                Button("Change…") { engine.chooseRecordingsFolder() }
+                    .controlSize(.small)
+                    .disabled(engine.isRecording || engine.isSaving)
+            }
         }
     }
 
