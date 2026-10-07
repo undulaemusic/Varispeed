@@ -34,7 +34,7 @@ struct MenuView: View {
             Circle()
                 .fill(engine.bridgeRunning ? Color.green : Color.secondary.opacity(0.4))
                 .frame(width: 8, height: 8)
-            Text(engine.bridgeRunning ? "Playing through" : "Not playing through")
+            Text(engine.bridgeRunning ? "Audio passthrough" : "Audio passthrough off")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -134,7 +134,7 @@ struct MenuView: View {
 
     private var outputSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Toggle("Play through to", isOn: $engine.bridgeEnabled)
+            Toggle("Output to device", isOn: $engine.bridgeEnabled)
             Picker("Device", selection: $engine.outputUID) {
                 if engine.selectedDevice == nil {
                     Text(engine.outputUID.isEmpty ? "Choose…" : "Not connected").tag(engine.outputUID)
