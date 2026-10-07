@@ -13,8 +13,10 @@
 //==================================================================================================
 
 #include <CoreAudio/AudioServerPlugIn.h>
+#include "VarispeedProperties.h"
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <sys/syslog.h>
@@ -276,20 +278,70 @@ static Float64                      gDevice_SampleRate                  = 48000.
 static Float64                      gDevice_RequestedSampleRate         = 0.0;
 static UInt64                       gDevice_IOIsRunning                 = 0;
 static UInt64                       gDevice2_IOIsRunning                = 0;
-static const UInt32                 kDevice_RingBufferSize              = 16384;
+// Varispeed: zero-timestamp period. Speed changes are re-anchored mid-period (see
+// BlackHole_GetZeroTimeStamp), so this mainly sets how often the HAL gets fresh timing.
+#ifndef kVarispeed_ZeroTimeStampPeriod
+#define                             kVarispeed_ZeroTimeStampPeriod      4096
+#endif
+static const UInt32                 kDevice_RingBufferSize              = kVarispeed_ZeroTimeStampPeriod;
 static Float64                      gDevice_HostTicksPerFrame           = 0.0;
 static Float64                      gDevice_AdjustedTicksPerFrame       = 0.0;
 static Float64                      gDevice_PreviousTicks               = 0.0;
 static UInt64                       gDevice_NumberTimeStamps            = 0;
 static Float64                      gDevice_AnchorSampleTime            = 0.0;
 
-// Varispeed: speed ratio s. Each zero-timestamp period of kDevice_RingBufferSize frames
-// spans (1/s) times its normal host-time length, so clients render s times as fast as
-// real time while the reported nominal sample rate stays unchanged.
+// Varispeed: speed ratio s. A zero-timestamp period of kDevice_RingBufferSize frames spans
+// (1/s) times its normal host-time length, so clients render s times as fast as real time
+// while the reported nominal sample rate stays unchanged. All of this is guarded by
+// gDevice_IOMutex. Ramps are geometric (linear in semitones) from RampFrom to Target.
 #ifndef kVarispeed_DefaultSpeed
 #define                             kVarispeed_DefaultSpeed             1.0
 #endif
-static Float64                      gVarispeed_Speed                    = kVarispeed_DefaultSpeed;
+#ifndef kVarispeed_DefaultRampSeconds
+#define                             kVarispeed_DefaultRampSeconds       0.5
+#endif
+static Float64                      gVarispeed_TargetSpeed              = kVarispeed_DefaultSpeed;
+static Float64                      gVarispeed_RampFromSpeed            = kVarispeed_DefaultSpeed;
+static UInt64                       gVarispeed_RampStartHostTime        = 0;
+static Float64                      gVarispeed_RampSeconds              = kVarispeed_DefaultRampSeconds;
+static Float64                      gVarispeed_RampTicks                = 0.0;
+static Float64                      gVarispeed_AppliedSpeed             = kVarispeed_DefaultSpeed;
+static Float64                      gVarispeed_PeriodEndTicks           = 0.0;
+static Float64                      gHostTicksPerSecond                 = 0.0;
+
+static const AudioServerPlugInCustomPropertyInfo kVarispeed_CustomProperties[] = {
+    { kVarispeedProperty_TargetSpeed,  kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
+    { kVarispeedProperty_RampSeconds,  kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
+    { kVarispeedProperty_CurrentSpeed, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
+};
+static const UInt32 kVarispeed_NumCustomProperties = sizeof(kVarispeed_CustomProperties) / sizeof(kVarispeed_CustomProperties[0]);
+
+//	Speed of the ramp at the given host time. Caller holds gDevice_IOMutex.
+static Float64 Varispeed_SpeedAt(UInt64 inHostTime)
+{
+    if (gVarispeed_RampTicks <= 0.0 || inHostTime <= gVarispeed_RampStartHostTime) {
+        return (gVarispeed_RampTicks <= 0.0) ? gVarispeed_TargetSpeed : gVarispeed_RampFromSpeed;
+    }
+    Float64 theFraction = (Float64)(inHostTime - gVarispeed_RampStartHostTime) / gVarispeed_RampTicks;
+    if (theFraction >= 1.0) { return gVarispeed_TargetSpeed; }
+    return gVarispeed_RampFromSpeed * pow(gVarispeed_TargetSpeed / gVarispeed_RampFromSpeed, theFraction);
+}
+
+static Float64 Varispeed_Clamp(Float64 inValue, Float64 inMin, Float64 inMax)
+{
+    if (!(inValue >= inMin)) { return inMin; }   // also catches NaN
+    if (inValue > inMax) { return inMax; }
+    return inValue;
+}
+
+//	Reads a double out of a CFNumber property-list value.
+static Boolean Varispeed_ReadNumber(UInt32 inDataSize, const void* inData, Float64* outValue)
+{
+    if (inDataSize != sizeof(CFPropertyListRef) || inData == NULL) { return false; }
+    CFPropertyListRef thePlist = *((const CFPropertyListRef*)inData);
+    if (thePlist == NULL || CFGetTypeID(thePlist) != CFNumberGetTypeID()) { return false; }
+    return CFNumberGetValue((CFNumberRef)thePlist, kCFNumberFloat64Type, outValue);
+}
 static UInt64                       gDevice_AnchorHostTime              = 0;
 
 static bool                         gStream_Input_IsActive              = true;
@@ -804,6 +856,7 @@ static OSStatus	BlackHole_Initialize(AudioServerPlugInDriverRef inDriver, AudioS
 	theHostClockFrequency *= 1000000000.0;
 	gDevice_HostTicksPerFrame = theHostClockFrequency / gDevice_SampleRate;
     gDevice_AdjustedTicksPerFrame = gDevice_HostTicksPerFrame - gDevice_HostTicksPerFrame/100.0 * 2.0*(gPitch_Adjust - 0.5);
+    gHostTicksPerSecond = theHostClockFrequency;
     
     // DebugMsg("BlackHole theTimeBaseInfo.numer: %u \t theTimeBaseInfo.denom: %u", theTimeBaseInfo.numer, theTimeBaseInfo.denom);
 	
@@ -2210,6 +2263,10 @@ static Boolean	BlackHole_HasDeviceProperty(AudioServerPlugInDriverRef inDriver, 
 		case kAudioDevicePropertyZeroTimeStampPeriod:
 		case kAudioDevicePropertyIcon:
 		case kAudioDevicePropertyStreams:
+		case kAudioObjectPropertyCustomPropertyInfoList:
+		case kVarispeedProperty_TargetSpeed:
+		case kVarispeedProperty_RampSeconds:
+		case kVarispeedProperty_CurrentSpeed:
 			theAnswer = true;
 			break;
 			
@@ -2273,10 +2330,14 @@ static OSStatus	BlackHole_IsDevicePropertySettable(AudioServerPlugInDriverRef in
 		case kAudioDevicePropertyPreferredChannelLayout:
 		case kAudioDevicePropertyZeroTimeStampPeriod:
 		case kAudioDevicePropertyIcon:
+		case kAudioObjectPropertyCustomPropertyInfoList:
+		case kVarispeedProperty_CurrentSpeed:
 			*outIsSettable = false;
 			break;
 		
 		case kAudioDevicePropertyNominalSampleRate:
+		case kVarispeedProperty_TargetSpeed:
+		case kVarispeedProperty_RampSeconds:
 			*outIsSettable = true;
 			break;
 		
@@ -2391,6 +2452,16 @@ static OSStatus	BlackHole_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 
 		case kAudioDevicePropertyAvailableNominalSampleRates:
 			*outDataSize = kDevice_SampleRatesSize * sizeof(AudioValueRange);
+			break;
+
+		case kAudioObjectPropertyCustomPropertyInfoList:
+			*outDataSize = kVarispeed_NumCustomProperties * sizeof(AudioServerPlugInCustomPropertyInfo);
+			break;
+
+		case kVarispeedProperty_TargetSpeed:
+		case kVarispeedProperty_RampSeconds:
+		case kVarispeedProperty_CurrentSpeed:
+			*outDataSize = sizeof(CFPropertyListRef);
 			break;
 		
 		case kAudioDevicePropertyIsHidden:
@@ -2848,6 +2919,31 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			*outDataSize = sizeof(UInt32);
 			break;
 
+		case kAudioObjectPropertyCustomPropertyInfoList:
+			{
+				UInt32 theCount = inDataSize / sizeof(AudioServerPlugInCustomPropertyInfo);
+				if (theCount > kVarispeed_NumCustomProperties) { theCount = kVarispeed_NumCustomProperties; }
+				memcpy(outData, kVarispeed_CustomProperties, theCount * sizeof(AudioServerPlugInCustomPropertyInfo));
+				*outDataSize = theCount * sizeof(AudioServerPlugInCustomPropertyInfo);
+			}
+			break;
+
+		case kVarispeedProperty_TargetSpeed:
+		case kVarispeedProperty_RampSeconds:
+		case kVarispeedProperty_CurrentSpeed:
+			FailWithAction(inDataSize < sizeof(CFPropertyListRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for a Varispeed property");
+			{
+				Float64 theValue;
+				pthread_mutex_lock(&gDevice_IOMutex);
+				if (inAddress->mSelector == kVarispeedProperty_TargetSpeed) { theValue = gVarispeed_TargetSpeed; }
+				else if (inAddress->mSelector == kVarispeedProperty_RampSeconds) { theValue = gVarispeed_RampSeconds; }
+				else { theValue = Varispeed_SpeedAt(mach_absolute_time()); }
+				pthread_mutex_unlock(&gDevice_IOMutex);
+				*((CFPropertyListRef*)outData) = CFNumberCreate(NULL, kCFNumberFloat64Type, &theValue);
+				*outDataSize = sizeof(CFPropertyListRef);
+			}
+			break;
+
 		case kAudioDevicePropertyIcon:
 			{
 				//	This is a CFURL that points to the device's Icon in the plug-in's resource bundle.
@@ -2910,6 +3006,43 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			{
 				//	we dispatch this so that the change can happen asynchronously
 				dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, kObjectID_Device, ChangeAction_SetSampleRate, NULL); });
+			}
+			break;
+
+		case kVarispeedProperty_TargetSpeed:
+			{
+				Float64 theNewSpeed;
+				FailWithAction(!Varispeed_ReadNumber(inDataSize, inData, &theNewSpeed), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_SetDevicePropertyData: Varispeed speed must be a CFNumber");
+				theNewSpeed = Varispeed_Clamp(theNewSpeed, kVarispeed_MinSpeed, kVarispeed_MaxSpeed);
+				pthread_mutex_lock(&gDevice_IOMutex);
+				if (theNewSpeed != gVarispeed_TargetSpeed)
+				{
+					//	start a new ramp from wherever the clock is right now
+					UInt64 theNow = mach_absolute_time();
+					gVarispeed_RampFromSpeed = Varispeed_SpeedAt(theNow);
+					gVarispeed_RampStartHostTime = theNow;
+					gVarispeed_RampTicks = gVarispeed_RampSeconds * gHostTicksPerSecond;
+					gVarispeed_TargetSpeed = theNewSpeed;
+					outChangedAddresses[*outNumberPropertiesChanged] = *inAddress;
+					*outNumberPropertiesChanged += 1;
+				}
+				pthread_mutex_unlock(&gDevice_IOMutex);
+			}
+			break;
+
+		case kVarispeedProperty_RampSeconds:
+			{
+				Float64 theNewRamp;
+				FailWithAction(!Varispeed_ReadNumber(inDataSize, inData, &theNewRamp), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_SetDevicePropertyData: Varispeed ramp time must be a CFNumber");
+				theNewRamp = Varispeed_Clamp(theNewRamp, 0.0, kVarispeed_MaxRampSeconds);
+				pthread_mutex_lock(&gDevice_IOMutex);
+				if (theNewRamp != gVarispeed_RampSeconds)
+				{
+					gVarispeed_RampSeconds = theNewRamp;
+					outChangedAddresses[*outNumberPropertiesChanged] = *inAddress;
+					*outNumberPropertiesChanged += 1;
+				}
+				pthread_mutex_unlock(&gDevice_IOMutex);
 			}
 			break;
 		
@@ -4355,6 +4488,10 @@ static OSStatus	BlackHole_StartIO(AudioServerPlugInDriverRef inDriver, AudioObje
         gDevice_AnchorSampleTime = 0;
         gDevice_AnchorHostTime = mach_absolute_time();
         gDevice_PreviousTicks = 0;
+        pthread_mutex_lock(&gDevice_IOMutex);
+        gVarispeed_AppliedSpeed = Varispeed_SpeedAt(gDevice_AnchorHostTime);
+        gVarispeed_PeriodEndTicks = gDevice_HostTicksPerFrame * ((Float64)kDevice_RingBufferSize) / gVarispeed_AppliedSpeed;
+        pthread_mutex_unlock(&gDevice_IOMutex);
         gRingBuffer = calloc(kRing_Buffer_Frame_Size * kNumber_Of_Channels, sizeof(Float32));
     }
     
@@ -4419,10 +4556,9 @@ static OSStatus	BlackHole_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, 
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 	UInt64 theCurrentHostTime;
-	Float64 theHostTicksPerRingBuffer;
-	Float64 theAdjustedTicksPerRingBuffer;
-	Float64 theNextTickOffset;
-	UInt64 theNextHostTime;
+	Float64 theNowTicks;
+	Float64 theBaseTicksPerPeriod;
+	Float64 theSpeed;
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_GetZeroTimeStamp: bad driver reference");
@@ -4433,26 +4569,37 @@ static OSStatus	BlackHole_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, 
 	
 	//	get the current host time
 	theCurrentHostTime = mach_absolute_time();
+	theNowTicks = (Float64)(theCurrentHostTime - gDevice_AnchorHostTime);
 	
-	//	calculate the next host time
-	theHostTicksPerRingBuffer = gDevice_HostTicksPerFrame * ((Float64)kDevice_RingBufferSize);
-    if (gClockSource_Value > 0) {
-        theAdjustedTicksPerRingBuffer = gDevice_AdjustedTicksPerFrame * ((Float64)kDevice_RingBufferSize);
-    }
-    else {
-        theAdjustedTicksPerRingBuffer = gDevice_HostTicksPerFrame * ((Float64)kDevice_RingBufferSize);
-    }
-    theAdjustedTicksPerRingBuffer /= gVarispeed_Speed;
-    
-	theNextTickOffset = gDevice_PreviousTicks + theAdjustedTicksPerRingBuffer;
-    
-	theNextHostTime = gDevice_AnchorHostTime + ((UInt64)theNextTickOffset);
+	//	normal-speed host ticks per zero-timestamp period
+	if (gClockSource_Value > 0) {
+		theBaseTicksPerPeriod = gDevice_AdjustedTicksPerFrame * ((Float64)kDevice_RingBufferSize);
+	}
+	else {
+		theBaseTicksPerPeriod = gDevice_HostTicksPerFrame * ((Float64)kDevice_RingBufferSize);
+	}
 	
-	//	go to the next time if the next host time is less than the current time
-	if(theNextHostTime <= theCurrentHostTime)
+	//	Varispeed: if the period in progress has ended, issue its time stamp. The next period
+	//	is laid out at the speed in effect when it starts.
+	if(gVarispeed_PeriodEndTicks <= theNowTicks)
 	{
 		++gDevice_NumberTimeStamps;
-		gDevice_PreviousTicks = theNextTickOffset;
+		gDevice_PreviousTicks = gVarispeed_PeriodEndTicks;
+		gVarispeed_PeriodEndTicks = gDevice_PreviousTicks + theBaseTicksPerPeriod / gVarispeed_AppliedSpeed;
+	}
+	
+	//	Varispeed: if the speed has changed, re-anchor at "now". The part of the current period
+	//	already played keeps its old timing; only the remaining frames are stretched to the new
+	//	speed. Sample time stays a continuous, monotonic function of host time.
+	theSpeed = Varispeed_SpeedAt(theCurrentHostTime);
+	if(theSpeed != gVarispeed_AppliedSpeed && theNowTicks < gVarispeed_PeriodEndTicks)
+	{
+		Float64 thePeriodTicks = gVarispeed_PeriodEndTicks - gDevice_PreviousTicks;
+		Float64 theDoneFraction = (thePeriodTicks > 0.0) ? (theNowTicks - gDevice_PreviousTicks) / thePeriodTicks : 1.0;
+		if (theDoneFraction < 0.0) { theDoneFraction = 0.0; }
+		if (theDoneFraction > 1.0) { theDoneFraction = 1.0; }
+		gVarispeed_PeriodEndTicks = theNowTicks + (1.0 - theDoneFraction) * theBaseTicksPerPeriod / theSpeed;
+		gVarispeed_AppliedSpeed = theSpeed;
 	}
 	
 	//	set the return values

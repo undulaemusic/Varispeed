@@ -1,0 +1,17 @@
+// Custom AudioObject properties exposed by the Varispeed device.
+// All values are CFNumber (doubles) passed as CFPropertyListRef.
+#ifndef VarispeedProperties_h
+#define VarispeedProperties_h
+
+// Target speed ratio s (settable). 1.0 = normal, 0.5 = half speed. Clamped to [min, max].
+#define kVarispeedProperty_TargetSpeed   0x76737064 /* 'vspd' */
+// Ramp time in seconds used to glide to a new target speed (settable). 0 = jump.
+#define kVarispeedProperty_RampSeconds   0x76737274 /* 'vsrt' */
+// Speed the clock is running at right now, mid-ramp included (read only).
+#define kVarispeedProperty_CurrentSpeed  0x76736373 /* 'vscs' */
+
+#define kVarispeed_MinSpeed              0.25
+#define kVarispeed_MaxSpeed              2.0
+#define kVarispeed_MaxRampSeconds        30.0
+
+#endif

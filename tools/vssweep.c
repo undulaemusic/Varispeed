@@ -1,0 +1,99 @@
+// vssweep: stress test for runtime speed changes.
+// Runs an IOProc on Varispeed (tone out, record in) and, while it runs, sweeps the speed
+// through a series of targets with different ramp times. Every IO cycle it checks that the
+// input sample time continues exactly where the previous cycle ended (no jumps, gaps or
+// backwards time) and once per second reports the measured speed vs. the driver's speed.
+//
+// Usage: vssweep [seconds-per-step=3]
+#include "vsdevice.h"
+#include <mach/mach_time.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <math.h>
+#include <unistd.h>
+
+static _Atomic uint64_t gFrames = 0, gCycles = 0, gDiscontinuities = 0, gBackwards = 0;
+static _Atomic double gLastEnd = -1, gWorstJump = 0;
+static double gPhase = 0, gRate = 48000;
+
+static OSStatus ioProc(AudioObjectID dev, const AudioTimeStamp *now, const AudioBufferList *in, const AudioTimeStamp *inTime,
+                       AudioBufferList *out, const AudioTimeStamp *outTime, void *ctx) {
+    if (in && in->mNumberBuffers > 0) {
+        UInt32 frames = in->mBuffers[0].mDataByteSize / (sizeof(float) * in->mBuffers[0].mNumberChannels);
+        double last = atomic_load(&gLastEnd);
+        if (last >= 0) {
+            double jump = inTime->mSampleTime - last;
+            if (fabs(jump) > 0.5) {
+                atomic_fetch_add(&gDiscontinuities, 1);
+                if (jump < 0) atomic_fetch_add(&gBackwards, 1);
+                if (fabs(jump) > fabs(atomic_load(&gWorstJump))) atomic_store(&gWorstJump, jump);
+            }
+        }
+        atomic_store(&gLastEnd, inTime->mSampleTime + frames);
+        atomic_fetch_add(&gFrames, frames);
+        atomic_fetch_add(&gCycles, 1);
+    }
+    if (out) for (UInt32 n = 0; n < out->mNumberBuffers; n++) {
+        AudioBuffer *b = &out->mBuffers[n];
+        UInt32 ch = b->mNumberChannels, frames = b->mDataByteSize / (sizeof(float) * ch);
+        float *d = b->mData;
+        for (UInt32 i = 0; i < frames; i++) {
+            float v = 0.1f * sinf((float)gPhase);
+            gPhase += 2 * M_PI * 440.0 / gRate; if (gPhase > 2 * M_PI) gPhase -= 2 * M_PI;
+            for (UInt32 c = 0; c < ch; c++) d[i * ch + c] = v;
+        }
+    }
+    return noErr;
+}
+
+static double now_s(void) {
+    static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+    return (double)mach_absolute_time() * tb.numer / tb.denom / 1e9;
+}
+
+int main(int argc, char **argv) {
+    double step = argc > 1 ? atof(argv[1]) : 3.0;
+    AudioObjectID dev = vs_find_device_by_uid(kVarispeed_DeviceUID);
+    if (!dev) { fprintf(stderr, "Varispeed not found\n"); return 1; }
+    AudioObjectPropertyAddress ra = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 sz = sizeof(gRate); AudioObjectGetPropertyData(dev, &ra, 0, NULL, &sz, &gRate);
+
+    struct { double speed, ramp; } steps[] = {
+        {1.0, 0}, {0.5, 0}, {2.0, 0}, {0.25, 0}, {1.0, 0},          // instant jumps across the range
+        {0.25, 1.0}, {2.0, 2.0}, {0.75, 0.5}, {1.5, 0.1}, {1.0, 0.5}, // ramps
+    };
+    int nsteps = sizeof steps / sizeof steps[0];
+
+    vs_set_double(dev, kVarispeedProperty_RampSeconds, 0);
+    vs_set_double(dev, kVarispeedProperty_TargetSpeed, 1.0);
+
+    AudioDeviceIOProcID pid;
+    if (AudioDeviceCreateIOProcID(dev, ioProc, NULL, &pid) != noErr) { fprintf(stderr, "IOProc failed\n"); return 1; }
+    AudioDeviceStart(dev, pid);
+    sleep(1);
+    atomic_store(&gDiscontinuities, 0); atomic_store(&gBackwards, 0); atomic_store(&gWorstJump, 0);
+
+    printf("%-6s %-6s %-5s | %-9s %-9s %-9s\n", "target", "ramp", "t", "driver", "measured", "discont");
+    for (int s = 0; s < nsteps; s++) {
+        vs_set_double(dev, kVarispeedProperty_RampSeconds, steps[s].ramp);
+        vs_set_double(dev, kVarispeedProperty_TargetSpeed, steps[s].speed);
+        double t0 = now_s();
+        uint64_t f0 = atomic_load(&gFrames); double tw = t0;
+        while (now_s() - t0 < step) {
+            usleep(500000);
+            double t = now_s(); uint64_t f = atomic_load(&gFrames);
+            double cur = 0; vs_get_double(dev, kVarispeedProperty_CurrentSpeed, &cur);
+            printf("%-6.3f %-6.2f %-5.1f | %-9.4f %-9.4f %-9llu\n", steps[s].speed, steps[s].ramp, t - t0, cur,
+                   (f - f0) / (gRate * (t - tw)), (unsigned long long)atomic_load(&gDiscontinuities));
+            f0 = f; tw = t;
+        }
+    }
+    AudioDeviceStop(dev, pid);
+    AudioDeviceDestroyIOProcID(dev, pid);
+    vs_set_double(dev, kVarispeedProperty_RampSeconds, 0.5);
+    vs_set_double(dev, kVarispeedProperty_TargetSpeed, 1.0);
+    printf("\nIO cycles: %llu  discontinuities: %llu  backwards: %llu  worst jump: %.1f frames\n",
+           (unsigned long long)atomic_load(&gCycles), (unsigned long long)atomic_load(&gDiscontinuities),
+           (unsigned long long)atomic_load(&gBackwards), atomic_load(&gWorstJump));
+    return 0;
+}

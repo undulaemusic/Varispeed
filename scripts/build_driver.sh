@@ -3,6 +3,7 @@
 # Output: build/Varispeed.driver (ad-hoc signed unless SIGN_IDENTITY is set).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "$ROOT/build"
 cd "$ROOT/driver"
 
 driverName="Varispeed"
@@ -31,8 +32,7 @@ xcodebuild \
   kSampleRates=44100,48000,88200,96000
   kCanBeDefaultDevice=false
   kCanBeDefaultSystemDevice=false
-  kVarispeed_DefaultSpeed=${DEFAULT_SPEED:-1.0}' \
-  | grep -E "error|warning: .*BlackHole.c|BUILD (SUCCEEDED|FAILED)" || true
-
-test -d "$ROOT/build/$driverName.driver"
+  kVarispeed_DefaultSpeed='"${DEFAULT_SPEED:-1.0}" \
+  > "$ROOT/build/driver_build.log" 2>&1 || { grep -E "error" "$ROOT/build/driver_build.log"; echo "** BUILD FAILED ** (full log: build/driver_build.log)"; exit 1; }
+echo "** BUILD SUCCEEDED **"
 codesign -dv "$ROOT/build/$driverName.driver" 2>&1 | grep -E "Identifier|Signature|Authority" || true
