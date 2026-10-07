@@ -86,11 +86,12 @@ struct MenuView: View {
 
             HStack {
                 Text("Glide").font(.callout)
-                Slider(value: $engine.rampSeconds, in: 0...5)
-                Text(engine.rampSeconds < 0.05 ? "quick" : String(format: "%.1f s", engine.rampSeconds))
+                Slider(value: $engine.rampSeconds, in: Engine.minGlideSeconds...5)
+                Text(String(format: "%.1f s", engine.rampSeconds))
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     .frame(width: 42, alignment: .trailing)
             }
+            .help("How long speed changes take. Big jumps can take a little longer: the driver limits how fast its clock may change so Core Audio keeps up.")
         }
     }
 

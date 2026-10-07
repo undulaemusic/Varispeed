@@ -22,6 +22,9 @@ struct Take: Identifiable, Hashable {
 final class Engine: ObservableObject {
     static let minSemitones = 12 * log2(Double(kVarispeed_MinSpeed))   // -24
     static let maxSemitones = 12 * log2(Double(kVarispeed_MaxSpeed))   // +12
+    /// The driver never glides faster than this (kVarispeed_MinRampSeconds in the driver);
+    /// shorter settings behave identically, so the slider starts here.
+    static let minGlideSeconds = 0.1
 
     // MARK: Speed
     @Published var targetSpeed: Double = 1.0 {
@@ -72,7 +75,7 @@ final class Engine: ObservableObject {
     private var lastRetry = Date.distantPast
 
     init() {
-        rampSeconds = defaults.object(forKey: "rampSeconds") as? Double ?? 0.5
+        rampSeconds = max(Self.minGlideSeconds, defaults.object(forKey: "rampSeconds") as? Double ?? 0.5)
         bridgeEnabled = defaults.object(forKey: "bridgeEnabled") as? Bool ?? true
         outputUID = defaults.string(forKey: "outputUID") ?? ""
         outputLeftChannel = defaults.object(forKey: "outputLeftChannel") as? Int ?? 0
