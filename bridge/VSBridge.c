@@ -1,0 +1,524 @@
+// VSBridge: see VSBridge.h for the overview.
+//
+// Realtime rules for the two IOProcs: no allocation, no locks, no Objective-C, no logging.
+// They talk to each other and to the control thread only through C11 atomics.
+
+#include "VSBridge.h"
+#include "../third_party/libsamplerate/samplerate.h"
+
+#include <CoreAudio/CoreAudio.h>
+#include <mach/mach_time.h>
+#include <math.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define kVarispeedUID          "Varispeed_UID"
+#define kRingFrames            (1u << 16)          // power of two; ~0.3 s even at 2x / 96 kHz
+#define kRingMask              (kRingFrames - 1)
+#define kScratchFrames         16384
+#define kChannels              2
+
+// Fill controller (all in seconds of input audio)
+#define kFillSmoothingSeconds  0.2
+#define kKp                    0.5                  // rate correction per second of fill error
+#define kKi                    0.05
+#define kMaxCorrection         0.03                 // +-3 %
+#define kGapDecayPerSecond     0.85                 // remembered worst input gap decays this much per second
+
+struct VSBridge {
+    VSBridgeConfig config;
+    char outputUID[256];
+
+    AudioObjectID inDevice, outDevice;
+    AudioDeviceIOProcID inProc, outProc;
+    bool started;
+
+    // ring buffer (single producer: input IOProc, single consumer: output IOProc)
+    float *ring;
+    _Atomic uint64_t writePos, readPos;
+
+    // input side -> output side
+    _Atomic double inNominalRate, outNominalRate;
+    _Atomic double inRateScalar;                    // HAL rate scalar of Varispeed (= 1/speed)
+    _Atomic uint64_t lastInputHostTime;
+    _Atomic double lastInputGapSeconds;
+    _Atomic bool resetRequested;
+
+    // output-thread state
+    SRC_STATE *src;
+    float *srcIn, *srcOut;
+    bool priming;
+    double fillErrLP, integral, worstGap, lastRatio;
+    double hostTicksPerSecond;
+    float glitchX1, glitchX2, glitchPeak;
+    int glitchWarmup;
+    double resamplerDelayInputFrames;
+
+    // stats (written by IO threads, read by anyone)
+    _Atomic double statInRealRate, statOutRealRate, statFillSeconds, statTargetSeconds, statCorrection, statCpu;
+    _Atomic uint64_t underruns, overflows, glitches, resets, inputCycles, outputCycles;
+
+    // output channel mapping, fixed at start
+    struct { UInt32 buffer, channel, stride; bool valid; } outMap[kChannels];
+    double outputDeviceLatencySeconds;
+
+    const char *_Atomic lastError;
+};
+
+#pragma mark - Helpers
+
+static double HostTicksPerSecond(void) {
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    return 1e9 * (double)tb.denom / (double)tb.numer;
+}
+
+static AudioObjectID DeviceForUID(const char *uid) {
+    AudioObjectPropertyAddress a = { kAudioHardwarePropertyTranslateUIDToDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    CFStringRef cf = CFStringCreateWithCString(NULL, uid, kCFStringEncodingUTF8);
+    AudioObjectID dev = kAudioObjectUnknown;
+    UInt32 size = sizeof(dev);
+    OSStatus err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, sizeof(cf), &cf, &size, &dev);
+    CFRelease(cf);
+    return err == noErr ? dev : kAudioObjectUnknown;
+}
+
+static bool CopyStringProperty(AudioObjectID dev, AudioObjectPropertySelector sel, char *out, size_t len) {
+    AudioObjectPropertyAddress a = { sel, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    CFStringRef s = NULL;
+    UInt32 size = sizeof(s);
+    if (AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &s) != noErr || !s) return false;
+    bool ok = CFStringGetCString(s, out, (CFIndex)len, kCFStringEncodingUTF8);
+    CFRelease(s);
+    return ok;
+}
+
+static AudioObjectID FindDeviceByNameHint(const char *hint, char *uidOut, size_t uidLen) {
+    AudioObjectPropertyAddress a = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &a, 0, NULL, &size) != noErr) return kAudioObjectUnknown;
+    AudioObjectID *ids = malloc(size);
+    AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, ids);
+    AudioObjectID found = kAudioObjectUnknown;
+    for (UInt32 i = 0; i < size / sizeof(AudioObjectID) && !found; i++) {
+        char name[256];
+        if (CopyStringProperty(ids[i], kAudioObjectPropertyName, name, sizeof name) && strstr(name, hint)
+            && CopyStringProperty(ids[i], kAudioDevicePropertyDeviceUID, uidOut, uidLen)) {
+            found = ids[i];
+        }
+    }
+    free(ids);
+    return found;
+}
+
+static double NominalRate(AudioObjectID dev) {
+    AudioObjectPropertyAddress a = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    Float64 rate = 0;
+    UInt32 size = sizeof(rate);
+    AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &rate);
+    return rate;
+}
+
+static UInt32 UInt32Property(AudioObjectID dev, AudioObjectPropertySelector sel, AudioObjectPropertyScope scope) {
+    AudioObjectPropertyAddress a = { sel, scope, kAudioObjectPropertyElementMain };
+    UInt32 v = 0, size = sizeof(v);
+    AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &v);
+    return v;
+}
+
+static void SetBufferFrames(AudioObjectID dev, UInt32 frames) {
+    if (!frames) return;
+    AudioObjectPropertyAddress a = { kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectSetPropertyData(dev, &a, 0, NULL, sizeof(frames), &frames);
+}
+
+// Turn off the streams an IOProc doesn't use, so the HAL doesn't do work for them.
+static void SetStreamUsage(AudioObjectID dev, AudioDeviceIOProcID proc, AudioObjectPropertyScope scope, bool on) {
+    AudioObjectPropertyAddress a = { kAudioDevicePropertyIOProcStreamUsage, scope, kAudioObjectPropertyElementMain };
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(dev, &a, 0, NULL, &size) != noErr || size < sizeof(AudioHardwareIOProcStreamUsage)) return;
+    AudioHardwareIOProcStreamUsage *usage = calloc(1, size);
+    usage->mIOProc = (void *)proc;
+    if (AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, usage) == noErr) {
+        for (UInt32 i = 0; i < usage->mNumberStreams; i++) usage->mStreamIsOn[i] = on;
+        AudioObjectSetPropertyData(dev, &a, 0, NULL, size, usage);
+    }
+    free(usage);
+}
+
+static int SRCType(VSBridgeQuality q) {
+    switch (q) {
+        case VSBridgeQualityMedium: return SRC_SINC_MEDIUM_QUALITY;
+        case VSBridgeQualityFast:   return SRC_SINC_FASTEST;
+        default:                    return SRC_SINC_BEST_QUALITY;
+    }
+}
+
+// Approximate group delay of libsamplerate's sinc filters, in input frames: one side of the
+// symmetric filter (coefficient table length / oversampling increment, from its *_coeffs.h).
+static double SRCDelayFrames(VSBridgeQuality q) {
+    switch (q) {
+        case VSBridgeQualityMedium: return 22438.0 / 491.0;
+        case VSBridgeQualityFast:   return 2464.0 / 128.0;
+        default:                    return 340239.0 / 2381.0;
+    }
+}
+
+#pragma mark - Realtime IOProcs
+
+static OSStatus InputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const AudioBufferList *in, const AudioTimeStamp *inTime,
+                            AudioBufferList *out, const AudioTimeStamp *outTime, void *ctx) {
+    VSBridge *b = ctx;
+    if (!in || in->mNumberBuffers == 0) return noErr;
+    const AudioBuffer *buf = &in->mBuffers[0];
+    UInt32 ch = buf->mNumberChannels ? buf->mNumberChannels : 1;
+    UInt32 frames = buf->mDataByteSize / (UInt32)(sizeof(float) * ch);
+    const float *src = buf->mData;
+
+    if (inTime->mFlags & kAudioTimeStampRateScalarValid && inTime->mRateScalar > 0)
+        atomic_store_explicit(&b->inRateScalar, inTime->mRateScalar, memory_order_relaxed);
+
+    uint64_t nowTicks = mach_absolute_time();
+    uint64_t last = atomic_exchange_explicit(&b->lastInputHostTime, nowTicks, memory_order_relaxed);
+    if (last) atomic_store_explicit(&b->lastInputGapSeconds, (double)(nowTicks - last) / b->hostTicksPerSecond, memory_order_relaxed);
+
+    uint64_t w = atomic_load_explicit(&b->writePos, memory_order_relaxed);
+    uint64_t r = atomic_load_explicit(&b->readPos, memory_order_acquire);
+    if (kRingFrames - (w - r) < frames) {
+        atomic_fetch_add_explicit(&b->overflows, 1, memory_order_relaxed);
+    } else {
+        for (UInt32 i = 0; i < frames; i++) {
+            float *dst = &b->ring[((w + i) & kRingMask) * kChannels];
+            dst[0] = src[i * ch];
+            dst[1] = src[i * ch + (ch > 1 ? 1 : 0)];
+        }
+        atomic_store_explicit(&b->writePos, w + frames, memory_order_release);
+    }
+    atomic_fetch_add_explicit(&b->inputCycles, 1, memory_order_relaxed);
+    return noErr;
+}
+
+// Test-tone glitch detector: for a sine of amplitude A and angular frequency w (rad/sample), the
+// second difference never exceeds A*w^2. Missing / repeated samples produce much larger spikes.
+// Only meaningful while a pure tone of <= 880 Hz is playing (used by the automated tests).
+static void DetectGlitches(VSBridge *b, const float *x, UInt32 frames, double outRate) {
+    double wmax = 2.0 * M_PI * 1000.0 / outRate;
+    for (UInt32 i = 0; i < frames; i++) {
+        float v = x[i * kChannels];
+        float a = fabsf(v);
+        b->glitchPeak = a > b->glitchPeak ? a : b->glitchPeak * 0.99999f;
+        float d2 = v - 2.0f * b->glitchX1 + b->glitchX2;
+        if (b->glitchWarmup > 0) b->glitchWarmup--;
+        else if (b->glitchPeak > 0.01f && fabsf(d2) > 4.0 * b->glitchPeak * wmax * wmax + 1e-4) {
+            atomic_fetch_add_explicit(&b->glitches, 1, memory_order_relaxed);
+            b->glitchWarmup = 64;   // count one event, not every sample of it
+        }
+        b->glitchX2 = b->glitchX1;
+        b->glitchX1 = v;
+    }
+}
+
+static void Reset(VSBridge *b) {
+    src_reset(b->src);
+    atomic_store_explicit(&b->readPos, atomic_load_explicit(&b->writePos, memory_order_acquire), memory_order_release);
+    b->priming = true;
+    b->fillErrLP = 0;
+    b->integral = 0;
+    b->glitchWarmup = 4096;
+    atomic_fetch_add_explicit(&b->resets, 1, memory_order_relaxed);
+}
+
+static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const AudioBufferList *in, const AudioTimeStamp *inTime,
+                             AudioBufferList *out, const AudioTimeStamp *outTime, void *ctx) {
+    VSBridge *b = ctx;
+    uint64_t t0 = mach_absolute_time();
+    if (!out || out->mNumberBuffers == 0) return noErr;
+    UInt32 frames = out->mBuffers[0].mDataByteSize / (UInt32)(sizeof(float) * (out->mBuffers[0].mNumberChannels ? out->mBuffers[0].mNumberChannels : 1));
+    if (frames > kScratchFrames) frames = kScratchFrames;
+    atomic_fetch_add_explicit(&b->outputCycles, 1, memory_order_relaxed);
+
+    if (atomic_exchange_explicit(&b->resetRequested, false, memory_order_acq_rel)) Reset(b);
+
+    // --- feed-forward rates (frames per real second)
+    double inNominal = atomic_load_explicit(&b->inNominalRate, memory_order_relaxed);
+    double outNominal = atomic_load_explicit(&b->outNominalRate, memory_order_relaxed);
+    double inRate = inNominal / atomic_load_explicit(&b->inRateScalar, memory_order_relaxed);
+    double outScalar = (outTime->mFlags & kAudioTimeStampRateScalarValid && outTime->mRateScalar > 0) ? outTime->mRateScalar : 1.0;
+    double outRate = outNominal / outScalar;
+    double dt = frames / outRate;
+
+    // --- target fill: cover the worst recent gap between input chunks, one output cycle, and a margin
+    double gap = atomic_load_explicit(&b->lastInputGapSeconds, memory_order_relaxed);
+    b->worstGap *= pow(kGapDecayPerSecond, dt);
+    if (gap > b->worstGap) b->worstGap = gap;
+    double targetSeconds = b->worstGap + dt + b->config.safetyMarginMs / 1000.0;
+
+    uint64_t w = atomic_load_explicit(&b->writePos, memory_order_acquire);
+    uint64_t r = atomic_load_explicit(&b->readPos, memory_order_relaxed);
+    double fillSeconds = (double)(w - r) / inRate;
+
+    float *res = b->srcOut;
+    UInt32 produced = 0;
+
+    if (b->priming) {
+        if (fillSeconds >= targetSeconds) { b->priming = false; b->fillErrLP = fillSeconds - targetSeconds; b->integral = 0; }
+    }
+
+    if (!b->priming) {
+        // --- PI correction on the smoothed fill error
+        double err = fillSeconds - targetSeconds;
+        b->fillErrLP += (err - b->fillErrLP) * fmin(1.0, dt / kFillSmoothingSeconds);
+        b->integral += b->fillErrLP * dt;
+        double iMax = kMaxCorrection / kKi;
+        if (b->integral > iMax) b->integral = iMax;
+        if (b->integral < -iMax) b->integral = -iMax;
+        double corr = kKp * b->fillErrLP + kKi * b->integral;
+        if (corr > kMaxCorrection) corr = kMaxCorrection;
+        if (corr < -kMaxCorrection) corr = -kMaxCorrection;
+        atomic_store_explicit(&b->statCorrection, corr, memory_order_relaxed);
+
+        double ratio = outRate / (inRate * (1.0 + corr));
+        if (ratio < 1.0 / 256.0) ratio = 1.0 / 256.0;
+        if (ratio > 256.0) ratio = 256.0;
+        b->lastRatio = ratio;
+
+        // --- resample until this output buffer is full
+        for (int guard = 0; produced < frames && guard < 16; guard++) {
+            w = atomic_load_explicit(&b->writePos, memory_order_acquire);
+            uint64_t avail = w - r;
+            uint64_t want = (uint64_t)ceil((frames - produced) / ratio) + 8;
+            uint64_t n = avail < want ? avail : want;
+            if (n > kScratchFrames) n = kScratchFrames;
+            for (uint64_t i = 0; i < n; i++) {
+                const float *s = &b->ring[((r + i) & kRingMask) * kChannels];
+                b->srcIn[i * kChannels] = s[0];
+                b->srcIn[i * kChannels + 1] = s[1];
+            }
+            SRC_DATA d = {
+                .data_in = b->srcIn, .data_out = res + produced * kChannels,
+                .input_frames = (long)n, .output_frames = (long)(frames - produced),
+                .end_of_input = 0, .src_ratio = ratio,
+            };
+            if (src_process(b->src, &d) != 0) break;
+            r += (uint64_t)d.input_frames_used;
+            produced += (UInt32)d.output_frames_gen;
+            if (d.input_frames_used == 0 && d.output_frames_gen == 0) break;   // starved
+        }
+        atomic_store_explicit(&b->readPos, r, memory_order_release);
+
+        if (produced < frames) {
+            atomic_fetch_add_explicit(&b->underruns, 1, memory_order_relaxed);
+            b->priming = true;
+        }
+    }
+    if (produced < frames) memset(res + produced * kChannels, 0, (frames - produced) * kChannels * sizeof(float));
+
+    DetectGlitches(b, res, frames, outNominal);
+
+    // --- write to the chosen output channels
+    if (!b->config.muteOutput) {
+        for (int c = 0; c < kChannels; c++) {
+            if (!b->outMap[c].valid || b->outMap[c].buffer >= out->mNumberBuffers) continue;
+            float *dst = out->mBuffers[b->outMap[c].buffer].mData;
+            UInt32 stride = b->outMap[c].stride, off = b->outMap[c].channel;
+            for (UInt32 i = 0; i < frames; i++) dst[i * stride + off] = res[i * kChannels + c];
+        }
+    }
+
+    atomic_store_explicit(&b->statInRealRate, inRate, memory_order_relaxed);
+    atomic_store_explicit(&b->statOutRealRate, outRate, memory_order_relaxed);
+    atomic_store_explicit(&b->statFillSeconds, b->priming ? fillSeconds : b->fillErrLP + targetSeconds, memory_order_relaxed);
+    atomic_store_explicit(&b->statTargetSeconds, targetSeconds, memory_order_relaxed);
+    atomic_store_explicit(&b->statCpu, (double)(mach_absolute_time() - t0) / b->hostTicksPerSecond / dt, memory_order_relaxed);
+    return noErr;
+}
+
+#pragma mark - Property listeners (HAL notification thread)
+
+static OSStatus RateListener(AudioObjectID obj, UInt32 n, const AudioObjectPropertyAddress *addrs, void *ctx) {
+    VSBridge *b = ctx;
+    atomic_store(&b->inNominalRate, NominalRate(b->inDevice));
+    atomic_store(&b->outNominalRate, NominalRate(b->outDevice));
+    atomic_store(&b->resetRequested, true);
+    return noErr;
+}
+
+static OSStatus AliveListener(AudioObjectID obj, UInt32 n, const AudioObjectPropertyAddress *addrs, void *ctx) {
+    VSBridge *b = ctx;
+    if (!UInt32Property(obj, kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal))
+        atomic_store(&b->lastError, obj == b->inDevice ? "Varispeed device went away" : "Output device went away");
+    return noErr;
+}
+
+#pragma mark - Public API
+
+void VSBridgeDefaultConfig(VSBridgeConfig *c) {
+    memset(c, 0, sizeof *c);
+    c->outputNameHint = "UltraLite";
+    c->outputChannels[0] = 0;
+    c->outputChannels[1] = 1;
+    c->quality = VSBridgeQualityBest;
+    c->inputBufferFrames = 64;
+    c->outputBufferFrames = 128;
+    c->safetyMarginMs = 2.0;
+}
+
+VSBridge *VSBridgeCreate(const VSBridgeConfig *config) {
+    VSBridge *b = calloc(1, sizeof *b);
+    b->config = *config;
+    b->config.outputDeviceUID = NULL;   // copied into outputUID at start
+    if (config->outputDeviceUID) snprintf(b->outputUID, sizeof b->outputUID, "%s", config->outputDeviceUID);
+    b->ring = calloc(kRingFrames * kChannels, sizeof(float));
+    b->srcIn = calloc(kScratchFrames * kChannels, sizeof(float));
+    b->srcOut = calloc(kScratchFrames * kChannels, sizeof(float));
+    int err = 0;
+    b->src = src_new(SRCType(config->quality), kChannels, &err);
+    b->hostTicksPerSecond = HostTicksPerSecond();
+    b->resamplerDelayInputFrames = SRCDelayFrames(config->quality);
+    atomic_store(&b->inRateScalar, 1.0);
+    return b;
+}
+
+static bool Fail(VSBridge *b, const char *msg) {
+    atomic_store(&b->lastError, msg);
+    VSBridgeStop(b);
+    return false;
+}
+
+bool VSBridgeStart(VSBridge *b) {
+    if (b->started) return true;
+    atomic_store(&b->lastError, NULL);
+    if (!b->src) return Fail(b, "Could not create the resampler");
+
+    b->inDevice = DeviceForUID(kVarispeedUID);
+    if (!b->inDevice) return Fail(b, "Varispeed device not found (is the driver installed?)");
+    b->outDevice = b->outputUID[0] ? DeviceForUID(b->outputUID)
+                                   : FindDeviceByNameHint(b->config.outputNameHint ? b->config.outputNameHint : "UltraLite", b->outputUID, sizeof b->outputUID);
+    if (!b->outDevice) return Fail(b, "Output device not found");
+    if (b->outDevice == b->inDevice) return Fail(b, "Output device can't be Varispeed itself");
+
+    // Map the chosen output channels onto the output device's stream buffers.
+    AudioObjectPropertyAddress sa = { kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain };
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(b->outDevice, &sa, 0, NULL, &size) != noErr) return Fail(b, "Can't read output channels");
+    AudioBufferList *bl = malloc(size);
+    AudioObjectGetPropertyData(b->outDevice, &sa, 0, NULL, &size, bl);
+    for (int c = 0; c < kChannels; c++) {
+        b->outMap[c].valid = false;
+        UInt32 base = 0;
+        for (UInt32 i = 0; i < bl->mNumberBuffers; i++) {
+            UInt32 n = bl->mBuffers[i].mNumberChannels;
+            if (b->config.outputChannels[c] >= (int)base && b->config.outputChannels[c] < (int)(base + n)) {
+                b->outMap[c].buffer = i;
+                b->outMap[c].channel = (UInt32)b->config.outputChannels[c] - base;
+                b->outMap[c].stride = n;
+                b->outMap[c].valid = true;
+            }
+            base += n;
+        }
+    }
+    free(bl);
+    if (!b->outMap[0].valid) return Fail(b, "Chosen output channels don't exist on the output device");
+
+    atomic_store(&b->inNominalRate, NominalRate(b->inDevice));
+    atomic_store(&b->outNominalRate, NominalRate(b->outDevice));
+    double outRate = atomic_load(&b->outNominalRate);
+    b->outputDeviceLatencySeconds = (UInt32Property(b->outDevice, kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput)
+                                   + UInt32Property(b->outDevice, kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput)) / (outRate > 0 ? outRate : 48000.0);
+
+    SetBufferFrames(b->inDevice, b->config.inputBufferFrames);
+    SetBufferFrames(b->outDevice, b->config.outputBufferFrames);
+
+    atomic_store(&b->writePos, 0);
+    atomic_store(&b->readPos, 0);
+    atomic_store(&b->lastInputHostTime, 0);
+    atomic_store(&b->lastInputGapSeconds, 0);
+    b->worstGap = 0;
+    src_reset(b->src);
+    b->priming = true;
+    b->glitchWarmup = 4096;
+
+    if (AudioDeviceCreateIOProcID(b->inDevice, InputIOProc, b, &b->inProc) != noErr) return Fail(b, "Can't open Varispeed input");
+    if (AudioDeviceCreateIOProcID(b->outDevice, OutputIOProc, b, &b->outProc) != noErr) return Fail(b, "Can't open output device");
+    SetStreamUsage(b->inDevice, b->inProc, kAudioObjectPropertyScopeOutput, false);
+    SetStreamUsage(b->outDevice, b->outProc, kAudioObjectPropertyScopeInput, false);
+
+    AudioObjectPropertyAddress ra = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectPropertyAddress la = { kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectAddPropertyListener(b->inDevice, &ra, RateListener, b);
+    AudioObjectAddPropertyListener(b->outDevice, &ra, RateListener, b);
+    AudioObjectAddPropertyListener(b->inDevice, &la, AliveListener, b);
+    AudioObjectAddPropertyListener(b->outDevice, &la, AliveListener, b);
+
+    b->started = true;
+    if (AudioDeviceStart(b->inDevice, b->inProc) != noErr) return Fail(b, "Can't start Varispeed input");
+    if (AudioDeviceStart(b->outDevice, b->outProc) != noErr) return Fail(b, "Can't start output device");
+    return true;
+}
+
+void VSBridgeStop(VSBridge *b) {
+    AudioObjectPropertyAddress ra = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectPropertyAddress la = { kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    if (b->outProc) {
+        AudioDeviceStop(b->outDevice, b->outProc);
+        AudioDeviceDestroyIOProcID(b->outDevice, b->outProc);
+        b->outProc = NULL;
+    }
+    if (b->inProc) {
+        AudioDeviceStop(b->inDevice, b->inProc);
+        AudioDeviceDestroyIOProcID(b->inDevice, b->inProc);
+        b->inProc = NULL;
+    }
+    if (b->started) {
+        AudioObjectRemovePropertyListener(b->inDevice, &ra, RateListener, b);
+        AudioObjectRemovePropertyListener(b->outDevice, &ra, RateListener, b);
+        AudioObjectRemovePropertyListener(b->inDevice, &la, AliveListener, b);
+        AudioObjectRemovePropertyListener(b->outDevice, &la, AliveListener, b);
+    }
+    b->started = false;
+}
+
+void VSBridgeGetStats(VSBridge *b, VSBridgeStats *s) {
+    memset(s, 0, sizeof *s);
+    s->running = b->started;
+    if (b->outDevice) CopyStringProperty(b->outDevice, kAudioObjectPropertyName, s->outputDeviceName, sizeof s->outputDeviceName);
+    s->inputSampleRate = atomic_load(&b->inNominalRate);
+    s->outputSampleRate = atomic_load(&b->outNominalRate);
+    s->inputRealRate = atomic_load(&b->statInRealRate);
+    s->outputRealRate = atomic_load(&b->statOutRealRate);
+    s->speed = s->inputSampleRate > 0 ? s->inputRealRate / s->inputSampleRate : 0;
+    s->ringFillMs = atomic_load(&b->statFillSeconds) * 1000.0;
+    s->targetFillMs = atomic_load(&b->statTargetSeconds) * 1000.0;
+    s->correctionPPM = atomic_load(&b->statCorrection) * 1e6;
+    double resamplerMs = s->inputRealRate > 0 ? b->resamplerDelayInputFrames / s->inputRealRate * 1000.0 : 0;
+    double outBufMs = s->outputSampleRate > 0 ? b->config.outputBufferFrames / s->outputSampleRate * 1000.0 : 0;
+    s->latencyMs = s->ringFillMs + resamplerMs + outBufMs;
+    s->outputDeviceLatencyMs = b->outputDeviceLatencySeconds * 1000.0;
+    s->cpuLoad = atomic_load(&b->statCpu);
+    s->underruns = atomic_load(&b->underruns);
+    s->overflows = atomic_load(&b->overflows);
+    s->glitches = atomic_load(&b->glitches);
+    s->resets = atomic_load(&b->resets);
+    s->inputCycles = atomic_load(&b->inputCycles);
+    s->outputCycles = atomic_load(&b->outputCycles);
+    s->lastError = atomic_load(&b->lastError);
+}
+
+void VSBridgeResetCounters(VSBridge *b) {
+    atomic_store(&b->underruns, 0);
+    atomic_store(&b->overflows, 0);
+    atomic_store(&b->glitches, 0);
+    atomic_store(&b->resets, 0);
+}
+
+void VSBridgeDestroy(VSBridge *b) {
+    if (!b) return;
+    VSBridgeStop(b);
+    if (b->src) src_delete(b->src);
+    free(b->ring);
+    free(b->srcIn);
+    free(b->srcOut);
+    free(b);
+}

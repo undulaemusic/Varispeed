@@ -9,7 +9,7 @@
 
 #define kVarispeed_DeviceUID "Varispeed_UID"
 
-static AudioObjectID vs_find_device_by_uid(const char *uid) {
+static inline AudioObjectID vs_find_device_by_uid(const char *uid) {
     AudioObjectPropertyAddress a = { kAudioHardwarePropertyTranslateUIDToDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     CFStringRef cfuid = CFStringCreateWithCString(NULL, uid, kCFStringEncodingUTF8);
     AudioObjectID dev = kAudioObjectUnknown;
@@ -19,7 +19,7 @@ static AudioObjectID vs_find_device_by_uid(const char *uid) {
     return err == noErr ? dev : kAudioObjectUnknown;
 }
 
-static OSStatus vs_get_double(AudioObjectID dev, AudioObjectPropertySelector sel, double *out) {
+static inline OSStatus vs_get_double(AudioObjectID dev, AudioObjectPropertySelector sel, double *out) {
     AudioObjectPropertyAddress a = { sel, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     CFPropertyListRef plist = NULL;
     UInt32 size = sizeof(plist);
@@ -31,7 +31,7 @@ static OSStatus vs_get_double(AudioObjectID dev, AudioObjectPropertySelector sel
     return noErr;
 }
 
-static OSStatus vs_set_double(AudioObjectID dev, AudioObjectPropertySelector sel, double value) {
+static inline OSStatus vs_set_double(AudioObjectID dev, AudioObjectPropertySelector sel, double value) {
     AudioObjectPropertyAddress a = { sel, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     CFNumberRef num = CFNumberCreate(NULL, kCFNumberFloat64Type, &value);
     CFPropertyListRef plist = num;
