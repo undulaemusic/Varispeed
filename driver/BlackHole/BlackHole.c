@@ -320,6 +320,10 @@ static Float64                      gDevice_AnchorSampleTime            = 0.0;
 #endif
 static Float64                      gVarispeed_MaxRiseSemitonesPerPeriod = kVarispeed_MaxRiseSemitonesPerPeriod;
 static Boolean                      gVarispeed_RampIsHarmonic           = false;
+// Smaller client IO buffers tolerate less HAL rate-estimate lag (measured: 64-frame buffers
+// are clean at 0.5 st/period, 32-frame buffers need 0.25), so the limit scales down below this.
+#define                             kVarispeed_MaxRiseReferenceBuffer   64.0
+static UInt32                       gVarispeed_SmallestIOBuffer         = UINT32_MAX;   // since IO started
 #ifndef kVarispeed_DefaultRampSeconds
 #define                             kVarispeed_DefaultRampSeconds       0.5
 #endif
@@ -3094,7 +3098,8 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 						//	With 1/s linear in time, ln(s) changes by a constant amount per device
 						//	frame: c = ln(2)/12 * maxSemitones / period. Then d(1/s)/dt = -c * fs,
 						//	so the shortest allowed ramp is (1/from - 1/to) / (c * fs).
-						Float64 thePerFrame = log(2.0) / 12.0 * gVarispeed_MaxRiseSemitonesPerPeriod / (Float64)kDevice_RingBufferSize;
+						Float64 theMaxRise = gVarispeed_MaxRiseSemitonesPerPeriod * fmin(1.0, (Float64)gVarispeed_SmallestIOBuffer / kVarispeed_MaxRiseReferenceBuffer);
+						Float64 thePerFrame = log(2.0) / 12.0 * theMaxRise / (Float64)kDevice_RingBufferSize;
 						theRampSeconds = fmax(theRampSeconds, (1.0 / gVarispeed_RampFromSpeed - 1.0 / theNewSpeed) / (thePerFrame * gDevice_SampleRate));
 					}
 					gVarispeed_RampTicks = theRampSeconds * gHostTicksPerSecond;
@@ -4619,6 +4624,7 @@ static OSStatus	BlackHole_StartIO(AudioServerPlugInDriverRef inDriver, AudioObje
             });
         }
         pthread_mutex_lock(&gDevice_IOMutex);
+        gVarispeed_SmallestIOBuffer = UINT32_MAX;
         gVarispeed_AppliedSpeed = Varispeed_SpeedAt(gDevice_AnchorHostTime);
         gVarispeed_PeriodEndTicks = gDevice_HostTicksPerFrame * ((Float64)kDevice_RingBufferSize) / gVarispeed_AppliedSpeed;
         pthread_mutex_unlock(&gDevice_IOMutex);
@@ -4796,7 +4802,7 @@ static OSStatus	BlackHole_BeginIOOperation(AudioServerPlugInDriverRef inDriver, 
 	//	This is called at the beginning of an IO operation. This device doesn't do anything, so just
 	//	check the arguments and return.
 	
-	#pragma unused(inClientID, inOperationID, inIOBufferFrameSize, inIOCycleInfo, inDeviceObjectID)
+	#pragma unused(inClientID, inOperationID, inIOCycleInfo, inDeviceObjectID)
 	
 	//	declare the local variables
 	OSStatus theAnswer = 0;
@@ -4804,6 +4810,9 @@ static OSStatus	BlackHole_BeginIOOperation(AudioServerPlugInDriverRef inDriver, 
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_BeginIOOperation: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_BeginIOOperation: bad device ID");
+	
+	//	Varispeed: remember the smallest client buffer (a plain store; a race only picks either value)
+	if (inIOBufferFrameSize > 0 && inIOBufferFrameSize < gVarispeed_SmallestIOBuffer) { gVarispeed_SmallestIOBuffer = inIOBufferFrameSize; }
 
 Done:
 	return theAnswer;
