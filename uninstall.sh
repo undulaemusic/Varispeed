@@ -11,5 +11,8 @@ if [ -d "$DEST" ]; then
 fi
 
 # Remove the menu bar app and its settings if they were installed.
-rm -rf "/Applications/Varispeed.app" "$HOME/Library/Preferences/com.undulaemusic.Varispeed.plist" 2>/dev/null || true
+rm -rf "/Applications/Varispeed.app" 2>/dev/null || true
+defaults delete com.undulaemusic.Varispeed 2>/dev/null || true
+rm -f "$HOME/Library/Preferences/com.undulaemusic.Varispeed.plist" \
+      "$HOME/Library/Preferences/com.undulaemusic.Varispeed.plist" 2>/dev/null || true   # pre-rename settings
 echo "Varispeed is fully removed."
