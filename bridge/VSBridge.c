@@ -36,6 +36,7 @@
 #define kDecaySlackSeconds     0.003
 #define kSlackWindowSeconds    2.0
 #define kMaxDelayStep          0.005                // one underrun raises D by at most this
+#define kChunkFloorFactor      3.0                  // D >= this many input buffers (in real time at the current speed)
 #define kBigSlackSeconds       0.03                 // more spare input than this -> cut D in one step
 #define kInputPausedSeconds    0.1                  // no input for this long -> output silence, don't adapt
 
@@ -361,6 +362,11 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
             b->delay += fmin(kDelayStepUp - fmin(0.0, slack), kMaxDelayStep);   // an underrun also adds the shortfall
             b->lastStepUpTime = b->clock;
         }
+        // Slower speed = each input buffer lasts longer in real time, so raise D ahead of time
+        // instead of waiting for an underrun. The position correction absorbs the gradual change.
+        double inBuf = b->config.inputBufferFrames ? b->config.inputBufferFrames : 512;
+        double floor = kChunkFloorFactor * inBuf / inRate + lookahead / inRate;
+        if (b->delay < floor) b->delay = floor;
         if (b->delay < kMinDelay) b->delay = kMinDelay;
         if (b->delay > kMaxDelay) b->delay = kMaxDelay;
 
