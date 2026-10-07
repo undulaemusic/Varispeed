@@ -255,7 +255,8 @@ final class Engine: ObservableObject {
         if let dev = varispeed {
             var s = 1.0
             if VSControlGetDouble(dev, AudioObjectPropertySelector(kVarispeedProperty_CurrentSpeed), &s) {
-                if abs(s - currentSpeed) > 1e-6 { currentSpeed = s }
+                // Only publish visible changes: every change redraws the menu bar item.
+                if abs(s - currentSpeed) > 0.0002 || (s == targetSpeed && s != currentSpeed) { currentSpeed = s }
             } else {
                 varispeed = nil          // driver went away (Core Audio restarted?)
                 driverInstalled = false
@@ -269,8 +270,10 @@ final class Engine: ObservableObject {
         if let b = bridge {
             var stats = VSBridgeStats()
             VSBridgeGetStats(b, &stats)
-            latencyMs = stats.latencyMs + stats.outputDeviceLatencyMs
-            dropouts = stats.underruns + stats.resyncs
+            let latency = (stats.latencyMs + stats.outputDeviceLatencyMs).rounded()
+            if latency != latencyMs { latencyMs = latency }
+            let d = stats.underruns + stats.resyncs
+            if d != dropouts { dropouts = d }
             if let err = stats.lastError {
                 bridgeProblem = String(cString: err)
                 stopBridge()
@@ -283,8 +286,9 @@ final class Engine: ObservableObject {
         if isRecording, let rec = recorder {
             var st = VSRecorderStatus()
             VSRecorderGetStatus(rec, &st)
-            recordSeconds = st.seconds
-            recordLevel = recordLevel * 0.7 + min(1, st.peak) * 0.3
+            if Int(st.seconds) != Int(recordSeconds) { recordSeconds = st.seconds }
+            let level = recordLevel * 0.7 + min(1, st.peak) * 0.3
+            if abs(level - recordLevel) > 0.01 { recordLevel = level }
         }
     }
 
