@@ -1,7 +1,7 @@
 // vsaggtest: Milestone 4. Can a Core Audio aggregate device with drift correction bridge
-// Varispeed to the MOTU? Creates a *private* aggregate (exists only while this runs, never
-// saved): Varispeed = clock master, MOTU = sub-device with drift compensation. Plays a quiet
-// 440 Hz tone (with a click-free pulse each second) into MOTU Main Out 1-2 and Phones,
+// Varispeed to a real output? Creates a *private* aggregate (exists only while this runs, never
+// saved): Varispeed = clock master, the default output device = sub-device with drift
+// compensation. Plays a quiet 440 Hz tone (with a click-free pulse each second) into its outputs 1-2,
 // steps through speeds, and counts overloads. At speed s you should hear 440*s Hz.
 //
 // Usage: vsaggtest [seconds-per-speed=8] [speeds...]   (default speeds: 1 0.98 0.9 0.75 0.5)
@@ -14,7 +14,7 @@
 
 static double gPhase = 0, gRate = 44100, gPulse = 0;
 static _Atomic uint64_t gOverloads = 0, gCycles = 0;
-static UInt32 gMotuFirstChannel = 2;   // Varispeed's 2 output channels come first in the aggregate
+static UInt32 gOutputFirstChannel = 2;   // Varispeed's 2 output channels come first in the aggregate
 static int gSilent = 0;
 
 static OSStatus ioProc(AudioObjectID dev, const AudioTimeStamp *now, const AudioBufferList *in, const AudioTimeStamp *inTime,
@@ -26,15 +26,15 @@ static OSStatus ioProc(AudioObjectID dev, const AudioTimeStamp *now, const Audio
         UInt32 ch = b->mNumberChannels, frames = b->mDataByteSize / (sizeof(float) * ch);
         float *d = b->mData;
         memset(d, 0, b->mDataByteSize);
-        if (n == out->mNumberBuffers - 1 || chanBase >= gMotuFirstChannel) {   // MOTU stream
+        if (n == out->mNumberBuffers - 1 || chanBase >= gOutputFirstChannel) {   // output device stream
             double phase = gPhase, pulse = gPulse;
             for (UInt32 i = 0; i < frames; i++) {
                 double env = 0.6 + 0.4 * cos(2 * M_PI * pulse);              // 1 Hz soft pulse
                 float v = gSilent ? 0.0f : (float)(0.05 * env * sin(phase));   // about -26 dBFS
                 phase += 2 * M_PI * 440.0 / gRate; if (phase > 2 * M_PI) phase -= 2 * M_PI;
                 pulse += 1.0 / gRate; if (pulse >= 1) pulse -= 1;
-                if (ch >= 2) { d[i * ch + 0] = v; d[i * ch + 1] = v; }        // Main Out 1-2
-                if (ch >= 12) { d[i * ch + 10] = v; d[i * ch + 11] = v; }     // Phones
+                d[i * ch] = v;                                                // outputs 1-2
+                if (ch >= 2) d[i * ch + 1] = v;
             }
             gPhase = phase; gPulse = pulse;
         }
@@ -48,23 +48,17 @@ static OSStatus overloadListener(AudioObjectID obj, UInt32 n, const AudioObjectP
     return noErr;
 }
 
-static AudioObjectID findMotu(char *uidOut, size_t len) {
-    AudioObjectPropertyAddress a = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-    UInt32 sz = 0; AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &a, 0, NULL, &sz);
-    AudioObjectID ids[128]; if (sz > sizeof ids) sz = sizeof ids;
-    AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &sz, ids);
-    for (UInt32 i = 0; i < sz / sizeof(AudioObjectID); i++) {
-        CFStringRef name = NULL, uid = NULL; UInt32 s = sizeof(name);
-        AudioObjectPropertyAddress na = { kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-        AudioObjectPropertyAddress ua = { kAudioDevicePropertyDeviceUID, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-        if (AudioObjectGetPropertyData(ids[i], &na, 0, NULL, &s, &name) || !name) continue;
-        char nb[256]; CFStringGetCString(name, nb, sizeof nb, kCFStringEncodingUTF8); CFRelease(name);
-        if (!strstr(nb, "UltraLite")) continue;
-        s = sizeof(uid); AudioObjectGetPropertyData(ids[i], &ua, 0, NULL, &s, &uid);
-        CFStringGetCString(uid, uidOut, len, kCFStringEncodingUTF8); CFRelease(uid);
-        return ids[i];
-    }
-    return 0;
+// The Mac's current default output device (read only; never changed).
+static AudioObjectID findOutput(char *uidOut, size_t len) {
+    AudioObjectPropertyAddress a = { kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectID dev = 0;
+    UInt32 sz = sizeof(dev);
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &sz, &dev) || !dev) return 0;
+    CFStringRef uid = NULL; sz = sizeof(uid);
+    AudioObjectPropertyAddress ua = { kAudioDevicePropertyDeviceUID, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    if (AudioObjectGetPropertyData(dev, &ua, 0, NULL, &sz, &uid) || !uid) return 0;
+    CFStringGetCString(uid, uidOut, len, kCFStringEncodingUTF8); CFRelease(uid);
+    return dev;
 }
 
 int main(int argc, char **argv) {
@@ -74,20 +68,20 @@ int main(int argc, char **argv) {
     int nspeeds = argc > 2 ? argc - 2 : 5;
 
     AudioObjectID vs = vs_find_device_by_uid(kVarispeed_DeviceUID);
-    char motuUID[256];
-    AudioObjectID motu = findMotu(motuUID, sizeof motuUID);
-    if (!vs || !motu) { fprintf(stderr, "Need both Varispeed and the MOTU connected\n"); return 1; }
+    char outUID[256];
+    AudioObjectID output = findOutput(outUID, sizeof outUID);
+    if (!vs || !output) { fprintf(stderr, "Need the Varispeed driver and a default output device\n"); return 1; }
 
-    // Match Varispeed's nominal rate to the MOTU's (we never change the MOTU's own rate).
+    // Match Varispeed's nominal rate to the output's (we never change the output device's rate).
     AudioObjectPropertyAddress ra = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     UInt32 sz = sizeof(gRate);
-    AudioObjectGetPropertyData(motu, &ra, 0, NULL, &sz, &gRate);
+    AudioObjectGetPropertyData(output, &ra, 0, NULL, &sz, &gRate);
     AudioObjectSetPropertyData(vs, &ra, 0, NULL, sizeof(gRate), &gRate);
     sleep(1);
 
-    // Private aggregate: Varispeed is the clock; MOTU is drift-compensated at max quality.
+    // Private aggregate: Varispeed is the clock; the output is drift-compensated at max quality.
     CFStringRef vsUID = CFSTR(kVarispeed_DeviceUID);
-    CFStringRef mUID = CFStringCreateWithCString(NULL, motuUID, kCFStringEncodingUTF8);
+    CFStringRef mUID = CFStringCreateWithCString(NULL, outUID, kCFStringEncodingUTF8);
     int one = 1, quality = kAudioAggregateDriftCompensationMaxQuality;
     CFNumberRef cfOne = CFNumberCreate(NULL, kCFNumberIntType, &one), cfQ = CFNumberCreate(NULL, kCFNumberIntType, &quality);
     const void *vsKeys[] = { CFSTR(kAudioSubDeviceUIDKey) }, *vsVals[] = { vsUID };
@@ -114,7 +108,7 @@ int main(int argc, char **argv) {
     vs_set_double(vs, kVarispeedProperty_RampSeconds, 0.5);
     vs_set_double(vs, kVarispeedProperty_TargetSpeed, 1.0);
     AudioDeviceStart(agg, pid);
-    printf("Playing a quiet tone through MOTU Main Out 1-2 + Phones at %.0f Hz sample rate.\n", gRate);
+    printf("Playing a quiet tone through the default output (channels 1-2) at %.0f Hz sample rate.\n", gRate);
 
     for (int i = 0; i < nspeeds; i++) {
         double s = argc > 2 ? atof(argv[i + 2]) : defaults[i];

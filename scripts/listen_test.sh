@@ -1,5 +1,5 @@
 #!/bin/bash
-# Milestone 5 listening test: runs the bridge (Varispeed -> MOTU Main Out 1-2) and walks
+# Milestone 5 listening test: runs the bridge (Varispeed -> default output, channels 1-2) and walks
 # through a set of speeds with smooth glides. Start playback in Live (output = Varispeed) first.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CTL="$ROOT/build/varispeedctl"

@@ -80,6 +80,31 @@ int VSControlListOutputDevices(VSOutputDevice *devices, int max) {
     return count;
 }
 
+bool VSControlDefaultOutputDeviceUID(char *uid, int length) {
+    AudioObjectPropertyAddress a = { kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectID dev = kAudioObjectUnknown;
+    UInt32 size = sizeof(dev);
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, &dev) != noErr || !dev) return false;
+    return CopyString(dev, kAudioDevicePropertyDeviceUID, uid, (size_t)length);
+}
+
+bool VSControlOutputChannelName(const char *deviceUID, int channel, char *name, int length) {
+    AudioObjectPropertyAddress ta = { kAudioHardwarePropertyTranslateUIDToDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    CFStringRef uid = CFStringCreateWithCString(NULL, deviceUID, kCFStringEncodingUTF8);
+    AudioObjectID dev = kAudioObjectUnknown;
+    UInt32 size = sizeof(dev);
+    OSStatus err = AudioObjectGetPropertyData(kAudioObjectSystemObject, &ta, sizeof(uid), &uid, &size, &dev);
+    CFRelease(uid);
+    if (err != noErr || !dev) return false;
+    AudioObjectPropertyAddress na = { kAudioObjectPropertyElementName, kAudioObjectPropertyScopeOutput, (AudioObjectPropertyElement)channel };
+    CFStringRef s = NULL;
+    size = sizeof(s);
+    if (AudioObjectGetPropertyData(dev, &na, 0, NULL, &size, &s) != noErr || !s) return false;
+    bool ok = CFStringGetLength(s) > 0 && CFStringGetCString(s, name, length, kCFStringEncodingUTF8);
+    CFRelease(s);
+    return ok;
+}
+
 void VSControlObserveDeviceList(void (*callback)(void *), void *context) {
     AudioObjectPropertyAddress a = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &a, dispatch_get_main_queue(),

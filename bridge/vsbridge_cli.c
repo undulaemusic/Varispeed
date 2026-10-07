@@ -3,7 +3,8 @@
 //   vsbridge [--out L,R] [--quality best|medium|fast] [--in-buffer N] [--out-buffer N]
 //            [--margin MS] [--seconds N] [--mute] [--device-uid UID]
 //
-// --out takes 1-based channel numbers (MOTU: 1,2 = Main Out; 11,12 = Phones).
+// Plays to the Mac's current default output unless --device-uid is given.
+// --out takes 1-based channel numbers (default 1,2).
 #include "VSBridge.h"
 #include "VSRecorder.h"
 #include <math.h>

@@ -27,6 +27,12 @@ typedef struct {
 // Fills up to max devices that have output channels (Varispeed itself excluded). Returns the count.
 int VSControlListOutputDevices(VSOutputDevice *devices, int max);
 
+// UID of the Mac's current default output device (read only). False if unavailable.
+bool VSControlDefaultOutputDeviceUID(char *uid, int length);
+
+// The name a device gives one of its output channels (1-based), e.g. "Main Out 1". False if none.
+bool VSControlOutputChannelName(const char *deviceUID, int channel, char *name, int length);
+
 // Calls back on the main queue whenever devices are added or removed.
 void VSControlObserveDeviceList(void (*callback)(void *context), void *context);
 

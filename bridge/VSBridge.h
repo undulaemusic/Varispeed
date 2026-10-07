@@ -1,4 +1,4 @@
-// VSBridge: plays the Varispeed device's input on a real output device (e.g. the MOTU),
+// VSBridge: plays the Varispeed device's input on a real output device (an audio interface),
 // resampling the sped-up / slowed-down stream into the output device's real clock.
 //
 //   Varispeed input IOProc --> lock-free ring buffer --> libsamplerate --> output IOProc
@@ -25,9 +25,8 @@ typedef enum {
 } VSBridgeQuality;
 
 typedef struct {
-    const char *outputDeviceUID;    // NULL = first device whose name contains outputNameHint
-    const char *outputNameHint;     // e.g. "UltraLite"
-    int outputChannels[2];          // 0-based output channels for left/right (e.g. {0,1} = Main Out 1-2)
+    const char *outputDeviceUID;    // NULL = the Mac's current default output device
+    int outputChannels[2];          // 0-based output channels for left/right (e.g. {0,1} = outputs 1-2)
     VSBridgeQuality quality;
     uint32_t inputBufferFrames;     // IO buffer this process asks of Varispeed (0 = leave as is)
     uint32_t outputBufferFrames;    // IO buffer this process asks of the output device (0 = leave as is)

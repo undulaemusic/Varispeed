@@ -165,12 +165,10 @@ struct MenuView: View {
     }
 
     private func pairName(_ left: Int) -> String {
-        // MOTU UltraLite mk5: 1-2 Main, 11-12 Phones
-        let isMotu = engine.selectedDevice?.name.contains("UltraLite") ?? false
+        // Use the device's own channel names when it has them (e.g. "Main Out 1 / Main Out 2").
         let base = "Outputs \(left + 1)–\(left + 2)"
-        if isMotu && left == 0 { return base + " (Main)" }
-        if isMotu && left == 10 { return base + " (Phones)" }
-        return base
+        guard let l = engine.channelName(left + 1), let r = engine.channelName(left + 2) else { return base }
+        return "\(base): \(l) / \(r)"
     }
 
     // MARK: Formatting

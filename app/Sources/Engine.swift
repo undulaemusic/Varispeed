@@ -173,9 +173,13 @@ final class Engine: ObservableObject {
             let name = withUnsafeBytes(of: &d.name) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
             return OutputDevice(uid: uid, name: name, channels: Int(d.outputChannels))
         }
-        // First run: default to the MOTU if it's there.
-        if outputUID.isEmpty, let motu = outputDevices.first(where: { $0.name.contains("UltraLite") }) {
-            outputUID = motu.uid
+        // First run: start with whatever the Mac's default output is (we only read it).
+        if outputUID.isEmpty {
+            var buf = [CChar](repeating: 0, count: 256)
+            if VSControlDefaultOutputDeviceUID(&buf, Int32(buf.count)) {
+                let uid = String(cString: buf)
+                if outputDevices.contains(where: { $0.uid == uid }) { outputUID = uid }
+            }
         }
     }
 
@@ -186,6 +190,13 @@ final class Engine: ObservableObject {
     }
 
     var selectedDevice: OutputDevice? { outputDevices.first { $0.uid == outputUID } }
+
+    /// The selected device's own name for an output channel (1-based), if it has one.
+    func channelName(_ channel: Int) -> String? {
+        var buf = [CChar](repeating: 0, count: 128)
+        guard VSControlOutputChannelName(outputUID, Int32(channel), &buf, Int32(buf.count)) else { return nil }
+        return String(cString: buf)
+    }
 
     func restartBridge() {
         stopBridge()

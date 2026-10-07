@@ -132,22 +132,14 @@ static bool CopyStringProperty(AudioObjectID dev, AudioObjectPropertySelector se
     return ok;
 }
 
-static AudioObjectID FindDeviceByNameHint(const char *hint, char *uidOut, size_t uidLen) {
-    AudioObjectPropertyAddress a = { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
-    UInt32 size = 0;
-    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &a, 0, NULL, &size) != noErr) return kAudioObjectUnknown;
-    AudioObjectID *ids = malloc(size);
-    AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, ids);
-    AudioObjectID found = kAudioObjectUnknown;
-    for (UInt32 i = 0; i < size / sizeof(AudioObjectID) && !found; i++) {
-        char name[256];
-        if (CopyStringProperty(ids[i], kAudioObjectPropertyName, name, sizeof name) && strstr(name, hint)
-            && CopyStringProperty(ids[i], kAudioDevicePropertyDeviceUID, uidOut, uidLen)) {
-            found = ids[i];
-        }
-    }
-    free(ids);
-    return found;
+// The Mac's current default output device (read only; never changed).
+static AudioObjectID DefaultOutputDevice(char *uidOut, size_t uidLen) {
+    AudioObjectPropertyAddress a = { kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectID dev = kAudioObjectUnknown;
+    UInt32 size = sizeof(dev);
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &size, &dev) != noErr) return kAudioObjectUnknown;
+    if (!CopyStringProperty(dev, kAudioDevicePropertyDeviceUID, uidOut, uidLen)) return kAudioObjectUnknown;
+    return dev;
 }
 
 static double NominalRate(AudioObjectID dev) {
@@ -514,7 +506,6 @@ static OSStatus AliveListener(AudioObjectID obj, UInt32 n, const AudioObjectProp
 
 void VSBridgeDefaultConfig(VSBridgeConfig *c) {
     memset(c, 0, sizeof *c);
-    c->outputNameHint = "UltraLite";
     c->outputChannels[0] = 0;
     c->outputChannels[1] = 1;
     c->quality = VSBridgeQualityBest;
@@ -556,8 +547,7 @@ bool VSBridgeStart(VSBridge *b) {
 
     b->inDevice = DeviceForUID(kVarispeedUID);
     if (!b->inDevice) return Fail(b, "Varispeed device not found (is the driver installed?)");
-    b->outDevice = b->outputUID[0] ? DeviceForUID(b->outputUID)
-                                   : FindDeviceByNameHint(b->config.outputNameHint ? b->config.outputNameHint : "UltraLite", b->outputUID, sizeof b->outputUID);
+    b->outDevice = b->outputUID[0] ? DeviceForUID(b->outputUID) : DefaultOutputDevice(b->outputUID, sizeof b->outputUID);
     if (!b->outDevice) return Fail(b, "Output device not found");
     if (b->outDevice == b->inDevice) return Fail(b, "Output device can't be Varispeed itself");
 
