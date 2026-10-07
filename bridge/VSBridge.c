@@ -35,6 +35,9 @@
 #define kDelayDecayPerSecond   0.001                // shorten D this fast while there's plenty of slack
 #define kDecaySlackSeconds     0.003
 #define kSlackWindowSeconds    2.0
+#define kMaxDelayStep          0.005                // one underrun raises D by at most this
+#define kBigSlackSeconds       0.03                 // more spare input than this -> cut D in one step
+#define kInputPausedSeconds    0.1                  // no input for this long -> output silence, don't adapt
 
 struct VSBridge {
     VSBridgeConfig config;
@@ -53,6 +56,7 @@ struct VSBridge {
     _Atomic double inRateScalar;                    // HAL rate scalar of Varispeed (= 1/speed)
     uint64_t histHost[kHistory], histPos[kHistory]; // written by input thread, published by histCount
     _Atomic uint64_t histCount;
+    uint64_t histFloor;                             // output thread ignores entries before this (set on reset)
     _Atomic bool resetRequested;
 
     // output-thread state
@@ -247,7 +251,9 @@ static OSStatus InputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const 
 static bool PositionAt(VSBridge *b, double t, double inRate, double *outPos) {
     uint64_t n = atomic_load_explicit(&b->histCount, memory_order_acquire);
     if (n < 2) return false;
+    if (n < b->histFloor + 2) return false;
     uint64_t newest = n - 1, oldest = n > kHistory - 16 ? n - (kHistory - 16) : 0;
+    if (oldest < b->histFloor) oldest = b->histFloor;
     double tNew = (double)b->histHost[newest & kHistoryMask];
     if (t >= tNew) {
         *outPos = (double)b->histPos[newest & kHistoryMask] + (t - tNew) / b->hostTicksPerSecond * inRate;
@@ -268,6 +274,8 @@ static bool PositionAt(VSBridge *b, double t, double inRate, double *outPos) {
 static void Reset(VSBridge *b) {
     src_reset(b->src);
     b->primed = false;
+    b->histFloor = atomic_load_explicit(&b->histCount, memory_order_acquire);   // old timeline no longer valid
+    b->delay = kInitialDelay;
     b->glitchWarmup = 4096;
     atomic_fetch_add_explicit(&b->resets, 1, memory_order_relaxed);
 }
@@ -302,7 +310,14 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
     uint64_t w = atomic_load_explicit(&b->writePos, memory_order_acquire);
     uint64_t r = atomic_load_explicit(&b->readPos, memory_order_relaxed);
 
-    if (PositionAt(b, tStart - ticksD, inRate, &p0) && PositionAt(b, tEnd - ticksD, inRate, &p1) && p1 > p0) {
+    // Input paused (device reconfiguring, or IO stopped)? Play silence and resync when it resumes,
+    // rather than treating the gap as an underrun and growing D.
+    uint64_t hc = atomic_load_explicit(&b->histCount, memory_order_acquire);
+    bool inputPaused = hc <= b->histFloor
+        || (double)t0Ticks - (double)b->histHost[(hc - 1) & kHistoryMask] > (kInputPausedSeconds + b->delay) * b->hostTicksPerSecond;
+    if (inputPaused) b->primed = false;
+
+    if (!inputPaused && PositionAt(b, tStart - ticksD, inRate, &p0) && PositionAt(b, tEnd - ticksD, inRate, &p1) && p1 > p0) {
         double lookahead = b->resamplerDelayInputFrames * fmax(1.0, (p1 - p0) / frames) + 8.0;
 
         // jump instead of correcting when far off (first cycle, after underruns, rate changes)
@@ -335,14 +350,15 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
         double slack = ((double)w - (b->playPos + inFrames + lookahead)) / inRate;
         b->playPos += inFrames;
         if (b->clock - b->slackWindowStart > kSlackWindowSeconds) {
-            if (b->minSlack > kDecaySlackSeconds) b->delay -= kDelayDecayPerSecond * kSlackWindowSeconds;
+            if (b->minSlack > kBigSlackSeconds) b->delay -= b->minSlack - kDecaySlackSeconds;   // resyncs once
+            else if (b->minSlack > kDecaySlackSeconds) b->delay -= kDelayDecayPerSecond * kSlackWindowSeconds;
             b->minSlack = slack;
             b->slackWindowStart = b->clock;
         } else if (slack < b->minSlack) {
             b->minSlack = slack;
         }
         if (slack < kLowSlackSeconds && b->clock - b->lastStepUpTime > 0.05) {
-            b->delay += kDelayStepUp - fmin(0.0, slack);   // an underrun also adds the shortfall
+            b->delay += fmin(kDelayStepUp - fmin(0.0, slack), kMaxDelayStep);   // an underrun also adds the shortfall
             b->lastStepUpTime = b->clock;
         }
         if (b->delay < kMinDelay) b->delay = kMinDelay;
@@ -493,6 +509,7 @@ bool VSBridgeStart(VSBridge *b) {
     atomic_store(&b->writePos, 0);
     atomic_store(&b->readPos, 0);
     atomic_store(&b->histCount, 0);
+    b->histFloor = 0;
     src_reset(b->src);
     b->primed = false;
     b->delay = kInitialDelay;
