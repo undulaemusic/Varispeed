@@ -281,7 +281,7 @@ static UInt64                       gDevice2_IOIsRunning                = 0;
 // Varispeed: zero-timestamp period. Speed changes are re-anchored mid-period (see
 // BlackHole_GetZeroTimeStamp), so this mainly sets how often the HAL gets fresh timing.
 #ifndef kVarispeed_ZeroTimeStampPeriod
-#define                             kVarispeed_ZeroTimeStampPeriod      4096
+#define                             kVarispeed_ZeroTimeStampPeriod      1024
 #endif
 #ifndef kVarispeed_ClockAlgorithm
 #define                             kVarispeed_ClockAlgorithm           kAudioDeviceClockAlgorithmRaw
@@ -304,6 +304,11 @@ static Float64                      gDevice_AnchorSampleTime            = 0.0;
 // gDevice_IOMutex. Ramps are geometric (linear in semitones) from RampFrom to Target.
 #ifndef kVarispeed_DefaultSpeed
 #define                             kVarispeed_DefaultSpeed             1.0
+#endif
+// Even an "instant" change glides over at least this long. Large unannounced rate jumps
+// (e.g. 2x -> 0.25x) can make the HAL abandon the device's clock until IO restarts.
+#ifndef kVarispeed_MinRampSeconds
+#define                             kVarispeed_MinRampSeconds           0.05
 #endif
 #ifndef kVarispeed_DefaultRampSeconds
 #define                             kVarispeed_DefaultRampSeconds       0.5
@@ -3064,7 +3069,7 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 					UInt64 theNow = mach_absolute_time();
 					gVarispeed_RampFromSpeed = Varispeed_SpeedAt(theNow);
 					gVarispeed_RampStartHostTime = theNow;
-					gVarispeed_RampTicks = gVarispeed_RampSeconds * gHostTicksPerSecond;
+					gVarispeed_RampTicks = fmax(gVarispeed_RampSeconds, kVarispeed_MinRampSeconds) * gHostTicksPerSecond;
 					gVarispeed_TargetSpeed = theNewSpeed;
 					outChangedAddresses[*outNumberPropertiesChanged] = *inAddress;
 					*outNumberPropertiesChanged += 1;
@@ -3078,6 +3083,7 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			{
 				Float64 theNewValue;
 				FailWithAction(!Varispeed_ReadNumber(inDataSize, inData, &theNewValue), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_SetDevicePropertyData: Varispeed debug value must be a CFNumber");
+				Boolean theApplied = false;
 				pthread_mutex_lock(&gPlugIn_StateMutex);
 				if (inAddress->mSelector == kVarispeedProperty_DebugPeriod) {
 					gVarispeed_PendingPeriod = (UInt32)Varispeed_Clamp(theNewValue, 256.0, 16384.0);
@@ -3087,7 +3093,21 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 						gVarispeed_PendingClockAlgorithm = theAlgorithm;
 					}
 				}
+				if (!gDevice_IOIsRunning && !gDevice2_IOIsRunning) {
+					kDevice_RingBufferSize = gVarispeed_PendingPeriod;
+					gVarispeed_ClockAlgorithm = gVarispeed_PendingClockAlgorithm;
+					theApplied = true;
+				}
 				pthread_mutex_unlock(&gPlugIn_StateMutex);
+				if (theApplied) {
+					outChangedAddresses[0].mSelector = kAudioDevicePropertyZeroTimeStampPeriod;
+					outChangedAddresses[0].mScope = kAudioObjectPropertyScopeGlobal;
+					outChangedAddresses[0].mElement = kAudioObjectPropertyElementMain;
+					outChangedAddresses[1].mSelector = kAudioDevicePropertyClockAlgorithm;
+					outChangedAddresses[1].mScope = kAudioObjectPropertyScopeGlobal;
+					outChangedAddresses[1].mElement = kAudioObjectPropertyElementMain;
+					*outNumberPropertiesChanged = 2;
+				}
 			}
 			break;
 
