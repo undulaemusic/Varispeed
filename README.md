@@ -27,7 +27,7 @@ The Varispeed menu bar app then takes that slowed (or sped-up) stream and plays 
 In Terminal:
 
 ```bash
-git clone https://github.com/<your-username>/Varispeed.git
+git clone https://github.com/undulaemusic/Varispeed.git
 cd Varispeed
 ./install.sh
 ```
