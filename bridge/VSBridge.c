@@ -6,6 +6,7 @@
 #include "VSBridge.h"
 #include "VSRecorder.h"
 #include "../third_party/libsamplerate/samplerate.h"
+#include "../driver/BlackHole/VarispeedProperties.h"
 
 #include <CoreAudio/CoreAudio.h>
 #include <mach/mach_time.h>
@@ -25,8 +26,14 @@
 // The output plays the ring at position P(t - D): the input timeline delayed by D seconds.
 #define kHistory               2048                 // power of two; >= 0.6 s of 64-frame callbacks at 2x/96 kHz
 #define kHistoryMask           (kHistory - 1)
-#define kPhaseGain             0.05                 // fraction of position error corrected per output cycle
-#define kMaxPhaseCorrection    0.01                 // ... but never more than 1 % of the cycle's frames
+// The HAL's view of the Varispeed timeline jumps a little at every zero-timestamp update
+// (~20-90 ms apart), which would be heard as flutter. So the playback rate follows the driver's
+// exact speed curve, and the HAL timeline only steers a slow, smoothed position correction.
+#define kErrorSmoothingSeconds 0.3
+#define kCorrectionSeconds     1.0                  // remove a position error over about this long
+#define kMaxPhaseCorrection    0.005                // ... but never change the rate by more than 0.5 %
+#define kPhaseGain             0.05                 // fallback when the driver's curve isn't available
+#define kMaxPhaseCorrectionFallback 0.01
 #define kResyncSeconds         0.03                 // position error beyond this -> jump instead of correcting
 #define kInitialDelay          0.015
 #define kMinDelay              0.002
@@ -61,11 +68,17 @@ struct VSBridge {
     uint64_t histFloor;                             // output thread ignores entries before this (set on reset)
     _Atomic bool resetRequested;
 
+    // the driver's current speed ramp (seqlock: written by the property listener, read by output thread)
+    _Atomic uint32_t rampSeq;
+    double rampFrom, rampTo, rampStart, rampTicks;
+    _Atomic bool haveRamp;
+
     // output-thread state
     SRC_STATE *src;
     float *srcIn, *srcOut;
     bool primed;
-    double playPos;                                 // input frames the resampler has been told to consume (exact,
+    double playPos;
+    double errLP;                                   // smoothed timeline position error (frames)                                 // input frames the resampler has been told to consume (exact,
                                                     // unlike readPos, which runs ahead by libsamplerate's buffering)
     double delay;                                   // D, seconds
     double minSlack, slackWindowStart;              // smallest spare input (s) seen in this window
@@ -212,6 +225,25 @@ static void DetectGlitches(GlitchState g, const float *x, UInt32 frames, UInt32 
     }
 }
 
+// Speed of the driver's clock at host time t, computed exactly from its ramp parameters.
+static bool RampSpeedAt(VSBridge *b, double t, double *outSpeed) {
+    if (!atomic_load_explicit(&b->haveRamp, memory_order_acquire)) return false;
+    double from, to, start, ticks;
+    uint32_t s1, s2;
+    do {
+        s1 = atomic_load_explicit(&b->rampSeq, memory_order_acquire);
+        from = b->rampFrom; to = b->rampTo; start = b->rampStart; ticks = b->rampTicks;
+        atomic_thread_fence(memory_order_acquire);
+        s2 = atomic_load_explicit(&b->rampSeq, memory_order_relaxed);
+    } while ((s1 & 1) || s1 != s2);
+    if (from <= 0 || to <= 0) return false;
+    double f = ticks > 0 ? (t - start) / ticks : 1.0;
+    if (f < 0) f = 0;
+    if (f > 1) f = 1;
+    *outSpeed = 1.0 / (1.0 / from + (1.0 / to - 1.0 / from) * f);
+    return true;
+}
+
 static OSStatus InputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const AudioBufferList *in, const AudioTimeStamp *inTime,
                             AudioBufferList *out, const AudioTimeStamp *outTime, void *ctx) {
     VSBridge *b = ctx;
@@ -324,7 +356,7 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
         double lookahead = b->resamplerDelayInputFrames * fmax(1.0, (p1 - p0) / frames) + 8.0;
 
         // jump instead of correcting when far off (first cycle, after underruns, rate changes)
-        double err = b->playPos - p0;                      // > 0: we're ahead of the timeline
+        double err = b->playPos - p0;                      // > 0: we're ahead of the HAL timeline
         if (!b->primed || fabs(err) > kResyncSeconds * inRate) {
             double minPos = (double)w - (double)(kRingFrames - 8192);
             double target = fmax(p0, minPos);
@@ -332,15 +364,25 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
             r = (uint64_t)llround(target);
             b->playPos = (double)r;
             err = 0;
+            b->errLP = 0;
             b->primed = true;
             src_reset(b->src);
             b->glitchWarmup = 4096;
         }
 
-        // consume the timeline's span for this buffer, nudged to remove the position error
-        double span = p1 - p0;
-        double nudge = kPhaseGain * err;
-        double maxNudge = kMaxPhaseCorrection * span;
+        // How many input frames this buffer covers: from the driver's exact speed curve when we
+        // have it (smooth), else from the HAL timeline (steps at every zero-timestamp update).
+        double span, nudge, maxNudge, curveSpeed;
+        if (RampSpeedAt(b, 0.5 * (tStart + tEnd) - ticksD, &curveSpeed)) {
+            span = curveSpeed * inNominal * dt;
+            b->errLP += (err - b->errLP) * fmin(1.0, dt / kErrorSmoothingSeconds);
+            nudge = b->errLP * dt / kCorrectionSeconds;
+            maxNudge = kMaxPhaseCorrection * span;
+        } else {
+            span = p1 - p0;
+            nudge = kPhaseGain * err;
+            maxNudge = kMaxPhaseCorrectionFallback * span;
+        }
         if (nudge > maxNudge) nudge = maxNudge;
         if (nudge < -maxNudge) nudge = -maxNudge;
         double inFrames = span - nudge;
@@ -420,6 +462,30 @@ static OSStatus OutputIOProc(AudioObjectID dev, const AudioTimeStamp *now, const
 }
 
 #pragma mark - Property listeners (HAL notification thread)
+
+static void FetchRamp(VSBridge *b) {
+    AudioObjectPropertyAddress a = { kVarispeedProperty_RampParameters, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    CFPropertyListRef plist = NULL;
+    UInt32 size = sizeof(plist);
+    if (AudioObjectGetPropertyData(b->inDevice, &a, 0, NULL, &size, &plist) != noErr || !plist) return;
+    double v[5] = { 0 };
+    bool ok = CFGetTypeID(plist) == CFArrayGetTypeID() && CFArrayGetCount(plist) >= 4;
+    for (CFIndex i = 0; ok && i < 4; i++) {
+        CFTypeRef n = CFArrayGetValueAtIndex(plist, i);
+        ok = CFGetTypeID(n) == CFNumberGetTypeID() && CFNumberGetValue(n, kCFNumberFloat64Type, &v[i]);
+    }
+    CFRelease(plist);
+    if (!ok) return;
+    atomic_fetch_add_explicit(&b->rampSeq, 1, memory_order_acq_rel);     // odd: writing
+    b->rampFrom = v[0]; b->rampTo = v[1]; b->rampStart = v[2]; b->rampTicks = v[3];
+    atomic_fetch_add_explicit(&b->rampSeq, 1, memory_order_release);     // even: done
+    atomic_store_explicit(&b->haveRamp, true, memory_order_release);
+}
+
+static OSStatus RampListener(AudioObjectID obj, UInt32 n, const AudioObjectPropertyAddress *addrs, void *ctx) {
+    FetchRamp(ctx);
+    return noErr;
+}
 
 static OSStatus RateListener(AudioObjectID obj, UInt32 n, const AudioObjectPropertyAddress *addrs, void *ctx) {
     VSBridge *b = ctx;
@@ -533,6 +599,10 @@ bool VSBridgeStart(VSBridge *b) {
 
     AudioObjectPropertyAddress ra = { kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     AudioObjectPropertyAddress la = { kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    AudioObjectPropertyAddress rpa = { kVarispeedProperty_RampParameters, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    atomic_store(&b->haveRamp, false);
+    AudioObjectAddPropertyListener(b->inDevice, &rpa, RampListener, b);
+    FetchRamp(b);                    // older drivers without the property: falls back to the HAL timeline
     AudioObjectAddPropertyListener(b->inDevice, &ra, RateListener, b);
     AudioObjectAddPropertyListener(b->outDevice, &ra, RateListener, b);
     AudioObjectAddPropertyListener(b->inDevice, &la, AliveListener, b);
@@ -558,6 +628,8 @@ void VSBridgeStop(VSBridge *b) {
         b->inProc = NULL;
     }
     if (b->started) {
+        AudioObjectPropertyAddress rpa = { kVarispeedProperty_RampParameters, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+        AudioObjectRemovePropertyListener(b->inDevice, &rpa, RampListener, b);
         AudioObjectRemovePropertyListener(b->inDevice, &ra, RateListener, b);
         AudioObjectRemovePropertyListener(b->outDevice, &ra, RateListener, b);
         AudioObjectRemovePropertyListener(b->inDevice, &la, AliveListener, b);

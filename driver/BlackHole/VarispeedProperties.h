@@ -9,6 +9,10 @@
 #define kVarispeedProperty_RampSeconds   0x76737274 /* 'vsrt' */
 // Speed the clock is running at right now, mid-ramp included (read only).
 #define kVarispeedProperty_CurrentSpeed  0x76736373 /* 'vscs' */
+// The current ramp, so clients can compute the exact speed curve (read only, notifies on change):
+// CFArray of 5 CFNumbers [fromSpeed, targetSpeed, rampStartHostTime, rampTicks, generation].
+// s(t) = 1 / (1/from + (1/target - 1/from) * clamp((t - start) / ticks, 0, 1)); ticks <= 0 means s = target.
+#define kVarispeedProperty_RampParameters 0x76737270 /* 'vsrp' */
 
 // Development tuning (take effect the next time IO starts on the device):
 // zero-timestamp period in frames, and the HAL clock algorithm ('raww', 'iirf', 'mavg').
@@ -18,8 +22,6 @@
 #define kVarispeedProperty_DebugMaxRise         0x76736d72 /* 'vsmr' */
 // Max semitones the speed may fall per zero-timestamp period (applies to the next change).
 #define kVarispeedProperty_DebugMaxFall         0x76736d66 /* 'vsmf' */
-// Smallest client IO buffer the driver has seen since IO started (read only).
-#define kVarispeedProperty_DebugSmallestBuffer  0x76737362 /* 'vssb' */
 
 #define kVarispeed_MinSpeed              0.25
 #define kVarispeed_MaxSpeed              2.0
