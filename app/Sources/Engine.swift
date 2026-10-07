@@ -101,6 +101,29 @@ final class Engine: ObservableObject {
     func setSemitones(_ st: Double) { semitones = min(max(st, Self.minSemitones), Self.maxSemitones) }
     func resetSpeed() { targetSpeed = 1.0 }
 
+    /// Bumps the target up or down by some semitones (stops at the 25 % / 200 % limits).
+    /// Rounds away float fuzz so repeated bumps land on exact semitones.
+    func nudgeSemitones(_ delta: Double) {
+        let st = (semitones * 1000).rounded() / 1000
+        setSemitones(st + delta)
+    }
+
+    /// Sets the speed from a percentage (clamped to 25 %...200 %).
+    func setPercent(_ percent: Double) {
+        let s = percent / 100
+        targetSpeed = min(max(s, Double(kVarispeed_MinSpeed)), Double(kVarispeed_MaxSpeed))
+    }
+
+    /// Slider position -1...1 with 100 % in the middle: the left half covers -24...0 semitones
+    /// (25 %...100 %), the right half 0...+12 semitones (100 %...200 %). Snaps to 100 % near the middle.
+    var sliderPosition: Double {
+        get { semitones < 0 ? semitones / -Self.minSemitones : semitones / Self.maxSemitones }
+        set {
+            let p = abs(newValue) < 0.015 ? 0 : newValue
+            setSemitones(p < 0 ? p * -Self.minSemitones : p * Self.maxSemitones)
+        }
+    }
+
     private func sendSpeed() {
         guard let dev = varispeed else { return }
         VSControlSetDouble(dev, AudioObjectPropertySelector(kVarispeedProperty_TargetSpeed), targetSpeed)

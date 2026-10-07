@@ -56,22 +56,28 @@ struct MenuView: View {
                 }
             }
 
-            Slider(value: Binding(get: { engine.semitones }, set: { engine.setSemitones($0) }),
-                   in: Engine.minSemitones...Engine.maxSemitones) {
-                EmptyView()
-            } minimumValueLabel: {
+            HStack(spacing: 6) {
                 Text("25%").font(.caption2).foregroundStyle(.secondary)
-            } maximumValueLabel: {
+                Slider(value: Binding(get: { engine.sliderPosition }, set: { engine.sliderPosition = $0 }), in: -1...1)
+                    .background(alignment: .center) {
+                        // 100 % mark: the slider's middle
+                        Rectangle()
+                            .fill(Color.secondary.opacity(0.6))
+                            .frame(width: 1.5, height: 16)
+                            .allowsHitTesting(false)
+                    }
                 Text("200%").font(.caption2).foregroundStyle(.secondary)
             }
             .disabled(!engine.driverInstalled)
 
             HStack(spacing: 6) {
-                ForEach([-12.0, -2.0, -1.0, 12.0], id: \.self) { st in
-                    Button(semitoneText(st)) { engine.setSemitones(st) }
+                ForEach([-12.0, -1.0, 1.0, 12.0], id: \.self) { st in
+                    Button(semitoneText(st)) { engine.nudgeSemitones(st) }
                         .controlSize(.small)
+                        .help(st < 0 ? "Down \(Int(-st)) semitone\(st == -1 ? "" : "s")" : "Up \(Int(st)) semitone\(st == 1 ? "" : "s")")
                 }
                 Spacer()
+                PercentField { engine.setPercent($0) }
                 Button("100%") { engine.resetSpeed() }
                     .controlSize(.small)
                     .keyboardShortcut("0")
@@ -202,6 +208,35 @@ struct TakeRow: View {
         .onHover { hovering = $0 }
         .onDrag { NSItemProvider(contentsOf: take.url) ?? NSItemProvider() }
         .help("\(take.sampleRate) Hz · drag into Live")
+    }
+}
+
+/// Type a speed in percent and press Return.
+struct PercentField: View {
+    let onCommit: (Double) -> Void
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 2) {
+            TextField("%", text: $text)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 52)
+                .focused($focused)
+                .onSubmit(commit)
+                .help("Type a speed in percent (25 to 200) and press Return")
+            Text("%").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func commit() {
+        let cleaned = text.replacingOccurrences(of: "%", with: "").replacingOccurrences(of: ",", with: ".")
+            .trimmingCharacters(in: .whitespaces)
+        if let v = Double(cleaned) { onCommit(v) }
+        text = ""
+        focused = false
     }
 }
 
