@@ -1,8 +1,8 @@
 # Varispeed
 
-**Tape-style varispeed for your whole DAW on macOS.** Slow down or speed up everything your DAW plays (playhead, automation, synths, plugins, effect tails) with the pitch following the speed, like a tape machine. It's like Logic Pro's Varispeed, but for Ableton Live or any other DAW.
+THIS IS 100% VIBE CODED. USE AT YOUR OWN RISK. I DIDN'T EVEN LOOK AT THE CODE.
 
-> **Status: experimental.** Varispeed was built with AI assistance and has been tested on one setup (Apple Silicon Mac, macOS 26, Ableton Live 12). It works well there, but it's a hobby project, not a commercial product. Use it at your own risk.
+**Tape-style varispeed for your whole DAW on macOS.** Slow down or speed up everything your DAW plays (playhead, automation, synths, plugins, effect tails) with the pitch following the speed, like a tape machine. It's like Logic Pro's Varispeed, but for Ableton Live or any other DAW.
 
 - **50% to 200% speed** (−12 to +12 semitones), changed live while playing
 - **Smooth, tape-like glides** between speeds, as quick as your DAW's buffer size allows without glitching
@@ -80,7 +80,6 @@ Press **Record**, play with the speed, press **Stop**. The latest take appears i
 - **Live input while varispeeding isn't supported.** Use Varispeed as the output device with no input device. Recording external audio into your DAW would need the input to run on Varispeed's clock too.
 - **Your DAW's tempo display doesn't change**, and its time display falls behind (or ahead of) a real clock. That's expected: the DAW thinks it's playing normally.
 - **MIDI clock and Ableton Link drift** from external gear while you're not at 100%.
-- **Ableton Live's CPU meter reads high below about 50%.** It's the meter, not real load. In testing, the meter rose 3–4× at very slow speeds while Live's real CPU use went *down*. This is part of why the minimum speed is 50%.
 - **Latency:** the passthrough to your interface adds about 20 ms at 100%, more at slow speeds (roughly 25–45 ms) because each buffer lasts longer in real time.
 - **Buffer sizes** up to 256 samples. Every speed change glides as quickly as possible without glitching, which depends on the DAW's buffer size: at 128 and 256 an octave takes about 0.4 s down and 0.8 s up, at 64 twice as long, at 32 four times.
 - Stereo only (2 channels). Sample rates 44.1, 48, 88.2 and 96 kHz.
