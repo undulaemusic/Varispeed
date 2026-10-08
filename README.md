@@ -82,7 +82,7 @@ Press **Record**, play with the speed, press **Stop**. Each take appears in the 
 - **MIDI clock and Ableton Link drift** from external gear while you're not at 100%.
 - **Ableton Live's CPU meter reads high below about 50%.** It's the meter, not real load. In testing, the meter rose 3–4× at very slow speeds while Live's real CPU use went *down*. This is part of why the minimum speed is 50%.
 - **Latency:** the passthrough to your interface adds about 20 ms at 100%, more at slow speeds (roughly 25–45 ms) because each buffer lasts longer in real time.
-- **Buffer sizes** up to 256 samples. Every speed change glides as quickly as possible without glitching, which depends on the DAW's buffer size: at 128 and 256 an octave takes about 0.4 s down and 0.8 s up, at 64 twice as long, at 32 four times. The menu shows the current glide time.
+- **Buffer sizes** up to 256 samples. Every speed change glides as quickly as possible without glitching, which depends on the DAW's buffer size: at 128 and 256 an octave takes about 0.4 s down and 0.8 s up, at 64 twice as long, at 32 four times.
 - Stereo only (2 channels). Sample rates 44.1, 48, 88.2 and 96 kHz.
 
 ## Uninstall

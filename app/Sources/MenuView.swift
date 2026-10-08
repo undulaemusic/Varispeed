@@ -90,18 +90,7 @@ struct MenuView: View {
                     .keyboardShortcut("0")
             }
             .disabled(!engine.driverInstalled)
-
-            Text(glideText)
-                .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
         }
-    }
-
-    /// e.g. "Glide per octave: 0.4 s down, 0.8 s up (buffer 128)"
-    private var glideText: String {
-        let down = engine.quickestGlide(from: 1, to: 0.5)
-        let up = engine.quickestGlide(from: 0.5, to: 1)
-        let suffix = engine.dawBufferFrames > 0 ? " (buffer \(engine.dawBufferFrames))" : ""
-        return String(format: "Glide per octave: %.1f s down, %.1f s up", down, up) + suffix
     }
 
     // MARK: Recording
