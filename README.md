@@ -65,7 +65,7 @@ Press play in your DAW and you should hear it as usual. At 100%, it sounds exact
 | **Speed readouts** | **Double-click** the percentage or the semitone value to type an exact number, then press Return. |
 | **−12 st / −1 st / +1 st / +12 st** | Bump the speed down or up by that many semitones from where it is now. |
 | **100%** (or ⌘0) | Back to normal speed. |
-| **Glide** | How long speed changes take (0.1 to 2 s). Changing it during a glide retimes that glide. Very big jumps can take a little longer than the setting, because the driver limits how fast its clock may change. |
+| **Glide** | How long speed changes take (0.1 to 2 s). Changing it during a glide retimes that glide. Big jumps can take longer than the setting: the driver limits how fast its clock may change, and limits it more at small DAW buffer sizes (below 128) so the DAW doesn't glitch. The line under the slider shows the quickest octave glide at your current buffer size. |
 
 ## Recording
 
@@ -83,6 +83,7 @@ Press **Record**, play with the speed, press **Stop**. Each take appears in the 
 - **MIDI clock and Ableton Link drift** from external gear while you're not at 100%.
 - **Ableton Live's CPU meter reads high below about 50%.** It's the meter, not real load. In testing, the meter rose 3–4× at very slow speeds while Live's real CPU use went *down*. This is part of why the minimum speed is 50%.
 - **Latency:** the passthrough to your interface adds about 20 ms at 100%, more at slow speeds (roughly 25–45 ms) because each buffer lasts longer in real time.
+- **Buffer sizes** from 14 to 384 samples (the DAW's choice). At 64 and 32 the quickest glides are 2× and 4× gentler, to stay glitch-free.
 - Stereo only (2 channels). Sample rates 44.1, 48, 88.2 and 96 kHz.
 
 ## Uninstall

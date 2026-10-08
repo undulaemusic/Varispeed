@@ -98,7 +98,17 @@ struct MenuView: View {
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     .frame(width: 42, alignment: .trailing)
             }
+            Text(quickestGlideText)
+                .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
         }
+    }
+
+    /// e.g. "Buffer 64 · quickest octave: 0.8 s down, 1.6 s up"
+    private var quickestGlideText: String {
+        let down = engine.quickestGlide(from: 1, to: 0.5)
+        let up = engine.quickestGlide(from: 0.5, to: 1)
+        let prefix = engine.dawBufferFrames > 0 ? "Buffer \(engine.dawBufferFrames) · " : ""
+        return prefix + String(format: "quickest octave: %.1f s down, %.1f s up", down, up)
     }
 
     // MARK: Recording

@@ -332,6 +332,52 @@ static Float64                      gDevice_AnchorSampleTime            = 0.0;
 static Float64                      gVarispeed_MaxRiseSemitonesPerPeriod = kVarispeed_MaxRiseSemitonesPerPeriod;
 static Float64                      gVarispeed_MaxFallSemitonesPerPeriod = kVarispeed_MaxFallSemitonesPerPeriod;
 static UInt64                       gVarispeed_RampGeneration           = 0;
+
+// Varispeed: busy DAWs with small IO buffers can't absorb the HAL's late wake-ups during fast
+// speed changes (measured: 128 frames clean at full speed, 64 needs half, 32 a quarter). So the
+// smallest buffer any client used in the last two ~2 s windows scales the glide limits. The
+// Varispeed app's own passthrough (lightweight) is ignored. Racy plain stores; any value is fine.
+#define                             kVarispeed_BufferWindowSeconds      2.0
+#define                             kVarispeed_MaxIgnoredClients        16
+static UInt32                       gVarispeed_IgnoredClients[kVarispeed_MaxIgnoredClients];
+static UInt32                       gVarispeed_NumIgnoredClients        = 0;
+static UInt32                       gVarispeed_BufferCur                = UINT32_MAX;
+static UInt32                       gVarispeed_BufferPrev               = UINT32_MAX;
+static UInt64                       gVarispeed_BufferWindowStart        = 0;
+
+static Float64 gHostTicksPerSecond;                                     // defined (initialized) below
+
+static UInt32 Varispeed_ClientBufferFrames(void)
+{
+    UInt32 theCur = gVarispeed_BufferCur, thePrev = gVarispeed_BufferPrev;
+    return theCur < thePrev ? theCur : thePrev;            // UINT32_MAX = no client seen
+}
+
+static Float64 Varispeed_GlideScale(void)
+{
+    UInt32 theFrames = Varispeed_ClientBufferFrames();
+    if (theFrames == UINT32_MAX) { return 1.0; }
+    Float64 theScale = (Float64)theFrames / kVarispeed_FullSpeedBufferFrames;
+    if (theScale > 1.0) { theScale = 1.0; }
+    if (theScale < kVarispeed_MinGlideScale) { theScale = kVarispeed_MinGlideScale; }
+    return theScale;
+}
+
+static void Varispeed_NoteClientBuffer(UInt32 inClientID, UInt32 inFrames)
+{
+    if (inFrames < 16) { return; }                          // partial cycles aren't a client's buffer size
+    UInt32 theCount = gVarispeed_NumIgnoredClients;
+    for (UInt32 i = 0; i < theCount && i < kVarispeed_MaxIgnoredClients; i++) {
+        if (gVarispeed_IgnoredClients[i] == inClientID) { return; }
+    }
+    UInt64 theNow = mach_absolute_time();
+    if ((Float64)(theNow - gVarispeed_BufferWindowStart) > kVarispeed_BufferWindowSeconds * gHostTicksPerSecond) {
+        gVarispeed_BufferPrev = gVarispeed_BufferCur;
+        gVarispeed_BufferCur = UINT32_MAX;
+        gVarispeed_BufferWindowStart = theNow;
+    }
+    if (inFrames < gVarispeed_BufferCur) { gVarispeed_BufferCur = inFrames; }
+}
 #ifndef kVarispeed_DefaultRampSeconds
 #define                             kVarispeed_DefaultRampSeconds       0.5
 #endif
@@ -349,6 +395,7 @@ static const AudioServerPlugInCustomPropertyInfo kVarispeed_CustomProperties[] =
     { kVarispeedProperty_RampSeconds,  kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_CurrentSpeed, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_RampParameters, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
+    { kVarispeedProperty_ClientBufferFrames, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_DebugPeriod,  kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_DebugClockAlgorithm, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_DebugMaxRise, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
@@ -385,6 +432,7 @@ static void Varispeed_StartRamp(UInt64 theNow, Float64 theTarget)
     //	c = ln(2)/12 * maxSemitones / period. Then |d(1/s)/dt| = c * fs, so the shortest
     //	allowed ramp is |1/from - 1/to| / (c * fs).
     Float64 theMaxStep = (theTarget > gVarispeed_RampFromSpeed) ? gVarispeed_MaxRiseSemitonesPerPeriod : gVarispeed_MaxFallSemitonesPerPeriod;
+    theMaxStep *= Varispeed_GlideScale();
     Float64 thePerFrame = log(2.0) / 12.0 * theMaxStep / (Float64)kDevice_RingBufferSize;
     theRampSeconds = fmax(theRampSeconds, fabs(1.0 / gVarispeed_RampFromSpeed - 1.0 / theTarget) / (thePerFrame * gDevice_SampleRate));
     gVarispeed_RampTicks = theRampSeconds * gHostTicksPerSecond;
@@ -962,11 +1010,8 @@ Done:
 static OSStatus	BlackHole_AddDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo* inClientInfo)
 {
 	//	This method is used to inform the driver about a new client that is using the given device.
-	//	This allows the device to act differently depending on who the client is. This driver does
-	//	not need to track the clients using the device, so we just check the arguments and return
-	//	successfully.
-	
-	#pragma unused(inClientInfo)
+	//	Varispeed: the Varispeed app's passthrough is remembered so its (small, lightweight) IO
+	//	buffer doesn't make glides gentler; see Varispeed_NoteClientBuffer.
 	
 	//	declare the local variables
 	OSStatus theAnswer = 0;
@@ -975,6 +1020,17 @@ static OSStatus	BlackHole_AddDeviceClient(AudioServerPlugInDriverRef inDriver, A
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_AddDeviceClient: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_AddDeviceClient: bad device ID");
 
+	if (inClientInfo != NULL && inClientInfo->mBundleID != NULL
+		&& CFStringCompare(inClientInfo->mBundleID, CFSTR(kVarispeed_AppBundleID), 0) == kCFCompareEqualTo)
+	{
+		pthread_mutex_lock(&gPlugIn_StateMutex);
+		if (gVarispeed_NumIgnoredClients < kVarispeed_MaxIgnoredClients) {
+			gVarispeed_IgnoredClients[gVarispeed_NumIgnoredClients] = inClientInfo->mClientID;
+			gVarispeed_NumIgnoredClients += 1;
+		}
+		pthread_mutex_unlock(&gPlugIn_StateMutex);
+	}
+
 Done:
 	return theAnswer;
 }
@@ -982,10 +1038,7 @@ Done:
 static OSStatus	BlackHole_RemoveDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo* inClientInfo)
 {
 	//	This method is used to inform the driver about a client that is no longer using the given
-	//	device. This driver does not track clients, so we just check the arguments and return
-	//	successfully.
-	
-	#pragma unused(inClientInfo)
+	//	device. Varispeed: forget it if it was one of the app's ignored clients.
 	
 	//	declare the local variables
 	OSStatus theAnswer = 0;
@@ -993,6 +1046,19 @@ static OSStatus	BlackHole_RemoveDeviceClient(AudioServerPlugInDriverRef inDriver
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_RemoveDeviceClient: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_RemoveDeviceClient: bad device ID");
+
+	if (inClientInfo != NULL)
+	{
+		pthread_mutex_lock(&gPlugIn_StateMutex);
+		for (UInt32 i = 0; i < gVarispeed_NumIgnoredClients; i++) {
+			if (gVarispeed_IgnoredClients[i] == inClientInfo->mClientID) {
+				gVarispeed_IgnoredClients[i] = gVarispeed_IgnoredClients[gVarispeed_NumIgnoredClients - 1];
+				gVarispeed_NumIgnoredClients -= 1;
+				break;
+			}
+		}
+		pthread_mutex_unlock(&gPlugIn_StateMutex);
+	}
 
 Done:
 	return theAnswer;
@@ -2325,6 +2391,7 @@ static Boolean	BlackHole_HasDeviceProperty(AudioServerPlugInDriverRef inDriver, 
 		case kVarispeedProperty_RampSeconds:
 		case kVarispeedProperty_CurrentSpeed:
 		case kVarispeedProperty_RampParameters:
+		case kVarispeedProperty_ClientBufferFrames:
 		case kVarispeedProperty_DebugPeriod:
 		case kVarispeedProperty_DebugClockAlgorithm:
 		case kVarispeedProperty_DebugMaxRise:
@@ -2397,6 +2464,7 @@ static OSStatus	BlackHole_IsDevicePropertySettable(AudioServerPlugInDriverRef in
 		case kAudioObjectPropertyCustomPropertyInfoList:
 		case kVarispeedProperty_CurrentSpeed:
 		case kVarispeedProperty_RampParameters:
+		case kVarispeedProperty_ClientBufferFrames:
 		case kAudioDevicePropertyClockAlgorithm:
 		case kAudioDevicePropertyClockIsStable:
 			*outIsSettable = false;
@@ -2538,6 +2606,7 @@ static OSStatus	BlackHole_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 		case kVarispeedProperty_RampSeconds:
 		case kVarispeedProperty_CurrentSpeed:
 		case kVarispeedProperty_RampParameters:
+		case kVarispeedProperty_ClientBufferFrames:
 		case kVarispeedProperty_DebugPeriod:
 		case kVarispeedProperty_DebugClockAlgorithm:
 		case kVarispeedProperty_DebugMaxRise:
@@ -3047,6 +3116,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 		case kVarispeedProperty_TargetSpeed:
 		case kVarispeedProperty_RampSeconds:
 		case kVarispeedProperty_CurrentSpeed:
+		case kVarispeedProperty_ClientBufferFrames:
 		case kVarispeedProperty_DebugPeriod:
 		case kVarispeedProperty_DebugClockAlgorithm:
 		case kVarispeedProperty_DebugMaxRise:
@@ -3061,6 +3131,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 				else if (inAddress->mSelector == kVarispeedProperty_DebugClockAlgorithm) { theValue = gVarispeed_PendingClockAlgorithm; }
 				else if (inAddress->mSelector == kVarispeedProperty_DebugMaxRise) { theValue = gVarispeed_MaxRiseSemitonesPerPeriod; }
 				else if (inAddress->mSelector == kVarispeedProperty_DebugMaxFall) { theValue = gVarispeed_MaxFallSemitonesPerPeriod; }
+				else if (inAddress->mSelector == kVarispeedProperty_ClientBufferFrames) { UInt32 f = Varispeed_ClientBufferFrames(); theValue = (f == UINT32_MAX) ? 0 : f; }
 				else { theValue = Varispeed_SpeedAt(mach_absolute_time()); }
 				pthread_mutex_unlock(&gDevice_IOMutex);
 				*((CFPropertyListRef*)outData) = CFNumberCreate(NULL, kCFNumberFloat64Type, &theValue);
@@ -4871,7 +4942,7 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
 {
 	//	This is called to actually perform a given operation. 
 	
-	#pragma unused(inClientID, inIOCycleInfo, ioSecondaryBuffer, inDeviceObjectID)
+	#pragma unused(ioSecondaryBuffer, inDeviceObjectID)
 	
 	//	declare the local variables
 	OSStatus theAnswer = 0;
@@ -4880,6 +4951,9 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_DoIOOperation: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device && inDeviceObjectID != kObjectID_Device2, theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_DoIOOperation: bad device ID");
 	FailWithAction((inStreamObjectID != kObjectID_Stream_Input) && (inStreamObjectID != kObjectID_Stream_Output), theAnswer = kAudioHardwareBadObjectError, Done, "BlackHole_DoIOOperation: bad stream ID");
+
+	//	Varispeed: remember this client's IO buffer size (it scales how fast glides may be)
+	Varispeed_NoteClientBuffer(inClientID, inIOBufferFrameSize);
 
     // Calculate the ring buffer offsets and splits.
     UInt64 mSampleTime = inOperationID == kAudioServerPlugInIOOperationReadInput ? inIOCycleInfo->mInputTime.mSampleTime : inIOCycleInfo->mOutputTime.mSampleTime;

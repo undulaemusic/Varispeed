@@ -30,6 +30,22 @@
 #define kVarispeed_ModelUID              "com.undulaemusic.Varispeed.model"
 #define kVarispeed_BoxUID                "com.undulaemusic.Varispeed.box"
 
+// Smallest IO buffer (frames) any DAW-type client has used in the last ~2 s; 0 = none (read only).
+// The Varispeed app's own passthrough is not counted.
+#define kVarispeedProperty_ClientBufferFrames   0x76736362 /* 'vscb' */
+
+// Glide limits, shared with the app so it can show the quickest glide. With 1/s changing linearly
+// in time, a glide from s1 to s2 takes at least |1/s1 - 1/s2| / (c * sampleRate) seconds, where
+// c = ln(2)/12 * (max semitones per period) * glideScale / zeroTimeStampPeriod, and
+// glideScale = clamp(clientBufferFrames / kVarispeed_FullSpeedBufferFrames, kVarispeed_MinGlideScale, 1).
+#define kVarispeed_ZeroTimeStampPeriod          1024
+#define kVarispeed_MaxRiseSemitonesPerPeriod    0.5
+#define kVarispeed_MaxFallSemitonesPerPeriod    1.0
+#define kVarispeed_MinRampSeconds               0.1
+#define kVarispeed_FullSpeedBufferFrames        128.0   // busy DAWs at smaller buffers need gentler glides
+#define kVarispeed_MinGlideScale                0.125
+#define kVarispeed_AppBundleID                  "com.undulaemusic.Varispeed"
+
 #define kVarispeed_MinSpeed              0.5
 #define kVarispeed_MaxSpeed              2.0
 #define kVarispeed_MaxRampSeconds        30.0

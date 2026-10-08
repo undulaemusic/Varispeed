@@ -16,12 +16,20 @@
 static _Atomic uint64_t gFrames = 0, gCycles = 0, gDiscontinuities = 0, gBackwards = 0;
 static _Atomic double gLastEnd = -1, gWorstJump = 0;
 static double gPhase = 0, gRate = 48000;
+// VS_LOAD=0.6: make each IO cycle busy for 60% of its nominal duration, like a DAW rendering a
+// heavy project (a trivial client tolerates late wake-ups that a busy one can't).
+static double gLoad = 0, gTicksPerSecond = 0;
 // discontinuity log (written only by the IO thread, read after stop)
 typedef struct { uint64_t host; double sampleTime, jump; UInt32 frames; } JumpEvent;
 static JumpEvent gEvents[256]; static _Atomic int gNumEvents = 0;
 
 static OSStatus ioProc(AudioObjectID dev, const AudioTimeStamp *now, const AudioBufferList *in, const AudioTimeStamp *inTime,
                        AudioBufferList *out, const AudioTimeStamp *outTime, void *ctx) {
+    if (gLoad > 0 && out && out->mNumberBuffers > 0) {
+        UInt32 frames = out->mBuffers[0].mDataByteSize / (sizeof(float) * out->mBuffers[0].mNumberChannels);
+        uint64_t until = mach_absolute_time() + (uint64_t)(gLoad * frames / gRate * gTicksPerSecond);
+        while (mach_absolute_time() < until) { }
+    }
     if (in && in->mNumberBuffers > 0) {
         UInt32 frames = in->mBuffers[0].mDataByteSize / (sizeof(float) * in->mBuffers[0].mNumberChannels);
         double last = atomic_load(&gLastEnd);
@@ -71,6 +79,9 @@ int main(int argc, char **argv) {
         vs_set_double(dev, kVarispeedProperty_DebugClockAlgorithm, (double)(((UInt32)a[0] << 24) | ((UInt32)a[1] << 16) | ((UInt32)a[2] << 8) | (UInt32)a[3]));
     }
     if (getenv("VS_MAXRISE")) vs_set_double(dev, kVarispeedProperty_DebugMaxRise, atof(getenv("VS_MAXRISE")));
+    if (getenv("VS_MAXFALL")) vs_set_double(dev, kVarispeedProperty_DebugMaxFall, atof(getenv("VS_MAXFALL")));
+    if (getenv("VS_LOAD")) gLoad = atof(getenv("VS_LOAD"));
+    { mach_timebase_info_data_t tb; mach_timebase_info(&tb); gTicksPerSecond = 1e9 * tb.denom / tb.numer; }
     double minRamp = argc > 4 ? atof(argv[4]) : 0.0;
     double period = 0, algo = 0;
     vs_get_double(dev, kVarispeedProperty_DebugPeriod, &period);
