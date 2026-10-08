@@ -91,24 +91,17 @@ struct MenuView: View {
             }
             .disabled(!engine.driverInstalled)
 
-            HStack {
-                Text("Glide").font(.callout)
-                Slider(value: $engine.rampSeconds, in: Engine.minGlideSeconds...Engine.maxGlideSeconds)
-                Text(String(format: "%.1f s", engine.rampSeconds))
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    .frame(width: 42, alignment: .trailing)
-            }
-            Text(quickestGlideText)
+            Text(glideText)
                 .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
         }
     }
 
-    /// e.g. "Buffer 64 · quickest octave: 0.8 s down, 1.6 s up"
-    private var quickestGlideText: String {
+    /// e.g. "Glide per octave: 0.4 s down, 0.8 s up (buffer 128)"
+    private var glideText: String {
         let down = engine.quickestGlide(from: 1, to: 0.5)
         let up = engine.quickestGlide(from: 0.5, to: 1)
-        let prefix = engine.dawBufferFrames > 0 ? "Buffer \(engine.dawBufferFrames) · " : ""
-        return prefix + String(format: "quickest octave: %.1f s down, %.1f s up", down, up)
+        let suffix = engine.dawBufferFrames > 0 ? " (buffer \(engine.dawBufferFrames))" : ""
+        return String(format: "Glide per octave: %.1f s down, %.1f s up", down, up) + suffix
     }
 
     // MARK: Recording

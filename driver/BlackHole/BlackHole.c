@@ -383,7 +383,7 @@ static void Varispeed_NoteClientBuffer(UInt32 inClientID, UInt32 inFrames)
     if (inFrames < gVarispeed_BufferCur) { gVarispeed_BufferCur = inFrames; }
 }
 #ifndef kVarispeed_DefaultRampSeconds
-#define                             kVarispeed_DefaultRampSeconds       0.5
+#define                             kVarispeed_DefaultRampSeconds       0.0     /* quickest safe glide */
 #endif
 static Float64                      gVarispeed_TargetSpeed              = kVarispeed_DefaultSpeed;
 static Float64                      gVarispeed_RampFromSpeed            = kVarispeed_DefaultSpeed;

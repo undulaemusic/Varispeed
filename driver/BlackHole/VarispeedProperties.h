@@ -48,9 +48,9 @@
 //                      MinGlideScale, period / ReferencePeriod)
 // (upper bound: never faster per frame than at the reference). No DAW seen -> clientBuffer = 128.
 //
-// The HAL allows IO buffers up to about 3/8 of the zero-timestamp period: 1536 -> 576, so DAWs can
-// use 512-frame buffers.
-#define kVarispeed_ZeroTimeStampPeriod          1536
+// The HAL allows IO buffers up to about 3/8 of the zero-timestamp period: 1024 -> 384, so DAWs can
+// use up to 256-frame buffers (1536 would allow 512 but makes every glide ~2x gentler at 128).
+#define kVarispeed_ZeroTimeStampPeriod          1024
 #define kVarispeed_ReferencePeriod              1024.0
 #define kVarispeed_MaxRiseSemitonesPerPeriod    0.5
 #define kVarispeed_MaxFallSemitonesPerPeriod    1.0

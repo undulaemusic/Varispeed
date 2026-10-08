@@ -5,7 +5,7 @@
 > **Status: experimental.** Varispeed was built with AI assistance and has been tested on one setup (Apple Silicon Mac, macOS 26, Ableton Live 12). It works well there, but it's a hobby project, not a commercial product. Use it at your own risk.
 
 - **50% to 200% speed** (−12 to +12 semitones), changed live while playing
-- **Smooth, tape-like glides** between speeds (0.1 to 2 seconds)
+- **Smooth, tape-like glides** between speeds, as quick as your DAW's buffer size allows without glitching
 - **Records what you hear** to a WAV file at your project's sample rate, ready to drag back into your DAW
 - **Works with any audio interface**, or your Mac's built-in speakers
 - A small **menu bar app**; nothing to configure in your DAW beyond picking an output
@@ -65,7 +65,6 @@ Press play in your DAW and you should hear it as usual. At 100%, it sounds exact
 | **Speed readouts** | **Double-click** the percentage or the semitone value to type an exact number, then press Return. |
 | **−12 st / −1 st / +1 st / +12 st** | Bump the speed down or up by that many semitones from where it is now. |
 | **100%** (or ⌘0) | Back to normal speed. |
-| **Glide** | How long speed changes take (0.1 to 2 s). Changing it during a glide retimes that glide. Big jumps can take longer than the setting: the driver limits how fast its clock may change, and limits it more at small DAW buffer sizes (below 128) so the DAW doesn't glitch. The line under the slider shows the quickest octave glide at your current buffer size. |
 
 ## Recording
 
@@ -83,7 +82,7 @@ Press **Record**, play with the speed, press **Stop**. Each take appears in the 
 - **MIDI clock and Ableton Link drift** from external gear while you're not at 100%.
 - **Ableton Live's CPU meter reads high below about 50%.** It's the meter, not real load. In testing, the meter rose 3–4× at very slow speeds while Live's real CPU use went *down*. This is part of why the minimum speed is 50%.
 - **Latency:** the passthrough to your interface adds about 20 ms at 100%, more at slow speeds (roughly 25–45 ms) because each buffer lasts longer in real time.
-- **Buffer sizes** up to 512 samples. The quickest glides adapt to the buffer size to stay glitch-free: at 256 and 512 they're quickest (an octave in about 0.4–0.9 s), at 128 about twice as gentle, and gentler still at 64 and 32. The line under the Glide slider shows the current minimum.
+- **Buffer sizes** up to 256 samples. Every speed change glides as quickly as possible without glitching, which depends on the DAW's buffer size: at 128 and 256 an octave takes about 0.4 s down and 0.8 s up, at 64 twice as long, at 32 four times. The menu shows the current glide time.
 - Stereo only (2 channels). Sample rates 44.1, 48, 88.2 and 96 kHz.
 
 ## Uninstall

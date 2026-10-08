@@ -22,22 +22,12 @@ struct Take: Identifiable, Hashable {
 final class Engine: ObservableObject {
     static let minSemitones = 12 * log2(Double(kVarispeed_MinSpeed))   // -12
     static let maxSemitones = 12 * log2(Double(kVarispeed_MaxSpeed))   // +12
-    /// The driver never glides faster than this (kVarispeed_MinRampSeconds in the driver);
-    /// shorter settings behave identically, so the slider starts here.
-    static let minGlideSeconds = 0.1
-    static let maxGlideSeconds = 2.0
 
     // MARK: Speed
     @Published var targetSpeed: Double = 1.0 {
         didSet { if targetSpeed != oldValue { sendSpeed() } }
     }
     @Published private(set) var currentSpeed: Double = 1.0
-    @Published var rampSeconds: Double {
-        didSet {
-            defaults.set(rampSeconds, forKey: "rampSeconds")
-            if let dev = varispeed { VSControlSetDouble(dev, AudioObjectPropertySelector(kVarispeedProperty_RampSeconds), rampSeconds) }
-        }
-    }
 
     // MARK: Bridge
     @Published var bridgeEnabled: Bool {
@@ -87,7 +77,7 @@ final class Engine: ObservableObject {
     private var lastRetry = Date.distantPast
 
     init() {
-        rampSeconds = min(Self.maxGlideSeconds, max(Self.minGlideSeconds, defaults.object(forKey: "rampSeconds") as? Double ?? 0.5))
+        defaults.removeObject(forKey: "rampSeconds")       // the old Glide setting is gone
         bridgeEnabled = defaults.object(forKey: "bridgeEnabled") as? Bool ?? true
         outputUID = defaults.string(forKey: "outputUID") ?? ""
         outputLeftChannel = defaults.object(forKey: "outputLeftChannel") as? Int ?? 0
@@ -156,7 +146,8 @@ final class Engine: ObservableObject {
         }
         varispeed = dev
         driverInstalled = true
-        VSControlSetDouble(dev, AudioObjectPropertySelector(kVarispeedProperty_RampSeconds), rampSeconds)
+        // Glides are always as quick as the driver safely allows (it enforces the minimum).
+        VSControlSetDouble(dev, AudioObjectPropertySelector(kVarispeedProperty_RampSeconds), 0)
         var target = 1.0
         if VSControlGetDouble(dev, AudioObjectPropertySelector(kVarispeedProperty_TargetSpeed), &target) {
             // Keep within the app's range (an older driver allowed down to 25 %).
