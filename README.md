@@ -68,7 +68,7 @@ Press play in your DAW and you should hear it as usual. At 100%, it sounds exact
 
 ## Recording
 
-Press **Record**, play with the speed, press **Stop**. Each take appears in the menu: **drag and drop it into your DAW**.
+Press **Record**, play with the speed, press **Stop**. The latest take appears in the menu: **drag and drop it into your DAW**. Earlier takes stay in the recordings folder.
 
 - Takes are 32-bit float stereo WAV files at **Varispeed's sample rate, i.e. your project's**, so the speed changes are baked in and the take plays back exactly as you heard it.
 - They're saved to `Music/Varispeed Recordings` by default. Use **Change…** to pick another folder. Click the folder name to show it in Finder.

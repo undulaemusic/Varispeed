@@ -107,7 +107,6 @@ struct MenuView: View {
 
                 if engine.isRecording {
                     Text(duration(engine.recordSeconds)).font(.callout.monospacedDigit())
-                    LevelMeter(level: engine.recordLevel)
                 } else if engine.isSaving {
                     ProgressView().controlSize(.small)
                     Text("Saving…").font(.callout).foregroundStyle(.secondary)
@@ -320,20 +319,6 @@ struct SpeedSlider: NSViewRepresentable {
         slider.onDoubleClick = onDoubleClick
         slider.isEnabled = context.environment.isEnabled
         if abs(slider.doubleValue - value) > 1e-9 { slider.doubleValue = value }
-    }
-}
-
-struct LevelMeter: View {
-    let level: Double
-    var body: some View {
-        GeometryReader { g in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.secondary.opacity(0.2))
-                Capsule().fill(level > 0.95 ? Color.red : Color.green)
-                    .frame(width: g.size.width * min(1, max(0, level)))
-            }
-        }
-        .frame(width: 70, height: 6)
     }
 }
 

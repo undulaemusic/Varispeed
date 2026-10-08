@@ -51,7 +51,6 @@ final class Engine: ObservableObject {
     @Published private(set) var isRecording = false
     @Published private(set) var isSaving = false
     @Published private(set) var recordSeconds: Double = 0
-    @Published private(set) var recordLevel: Double = 0
     @Published private(set) var takes: [Take] = []
     @Published private(set) var recordingProblem: String?
 
@@ -278,8 +277,6 @@ final class Engine: ObservableObject {
             var st = VSRecorderStatus()
             VSRecorderGetStatus(rec, &st)
             if Int(st.seconds) != Int(recordSeconds) { recordSeconds = st.seconds }
-            let level = recordLevel * 0.7 + min(1, st.peak) * 0.3
-            if abs(level - recordLevel) > 0.01 { recordLevel = level }
         }
     }
 
@@ -323,7 +320,6 @@ final class Engine: ObservableObject {
             _ = VSRecorderStop(OpaquePointer(bitPattern: recPtr), target)
             await MainActor.run {
                 self.isSaving = false
-                self.recordLevel = 0
                 self.loadTakes()
             }
         }
@@ -341,7 +337,7 @@ final class Engine: ObservableObject {
                 return Take(url: url, date: values?.creationDate ?? .distantPast, duration: duration, sampleRate: rate)
             }
             .sorted { $0.date > $1.date }
-            .prefix(6).map { $0 }
+            .prefix(1).map { $0 }              // only the latest take is shown
     }
 
     private static func wavSampleRate(_ url: URL) -> Int? {
