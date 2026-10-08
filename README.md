@@ -1,6 +1,6 @@
 # Varispeed
 
-THIS IS 100% VIBE CODED. USE AT YOUR OWN RISK. I DIDN'T EVEN LOOK AT THE CODE.
+### THIS IS 100% VIBE CODED. USE AT YOUR OWN RISK. I DIDN'T EVEN LOOK AT THE CODE.
 
 **Tape-style varispeed for your whole DAW on macOS.** Slow down or speed up everything your DAW plays (playhead, automation, synths, plugins, effect tails) with the pitch following the speed, like a tape machine. It's like Logic Pro's Varispeed, but for Ableton Live or any other DAW.
 
