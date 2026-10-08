@@ -372,8 +372,11 @@ static void Varispeed_NoteClientBuffer(UInt32 inClientID, UInt32 inFrames)
         if (gVarispeed_IgnoredClients[i] == inClientID) { return; }
     }
     UInt64 theNow = mach_absolute_time();
-    if ((Float64)(theNow - gVarispeed_BufferWindowStart) > kVarispeed_BufferWindowSeconds * gHostTicksPerSecond) {
-        gVarispeed_BufferPrev = gVarispeed_BufferCur;
+    Float64 theElapsed = (Float64)(theNow - gVarispeed_BufferWindowStart);
+    Float64 theWindow = kVarispeed_BufferWindowSeconds * gHostTicksPerSecond;
+    if (theElapsed > theWindow) {
+        //	after a quiet spell (no IO for more than a window) the old sizes are stale: forget them
+        gVarispeed_BufferPrev = (theElapsed > 2.0 * theWindow) ? UINT32_MAX : gVarispeed_BufferCur;
         gVarispeed_BufferCur = UINT32_MAX;
         gVarispeed_BufferWindowStart = theNow;
     }
