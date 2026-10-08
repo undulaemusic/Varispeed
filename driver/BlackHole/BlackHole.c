@@ -334,9 +334,9 @@ static Float64                      gVarispeed_MaxFallSemitonesPerPeriod = kVari
 static UInt64                       gVarispeed_RampGeneration           = 0;
 
 // Varispeed: busy DAWs with small IO buffers can't absorb the HAL's late wake-ups during fast
-// speed changes (measured: 128 frames clean at full speed, 64 needs half, 32 a quarter). So the
-// smallest buffer any client used in the last two ~2 s windows scales the glide limits. The
-// Varispeed app's own passthrough (lightweight) is ignored. Racy plain stores; any value is fine.
+// speed changes, so the smallest buffer any client used in the last two ~2 s windows scales the
+// glide limits (formula in VarispeedProperties.h). The Varispeed app's own passthrough
+// (lightweight) is ignored. Racy plain stores; any value is fine.
 #define                             kVarispeed_BufferWindowSeconds      2.0
 #define                             kVarispeed_MaxIgnoredClients        16
 static UInt32                       gVarispeed_IgnoredClients[kVarispeed_MaxIgnoredClients];
@@ -356,9 +356,10 @@ static UInt32 Varispeed_ClientBufferFrames(void)
 static Float64 Varispeed_GlideScale(void)
 {
     UInt32 theFrames = Varispeed_ClientBufferFrames();
-    if (theFrames == UINT32_MAX) { return 1.0; }
-    Float64 theScale = (Float64)theFrames / kVarispeed_FullSpeedBufferFrames;
-    if (theScale > 1.0) { theScale = 1.0; }
+    Float64 theBuffer = (theFrames == UINT32_MAX) ? kVarispeed_FullSpeedBufferFrames : (Float64)theFrames;
+    Float64 thePeriodRatio = (Float64)kDevice_RingBufferSize / kVarispeed_ReferencePeriod;
+    Float64 theScale = theBuffer / kVarispeed_FullSpeedBufferFrames / thePeriodRatio;
+    if (theScale > thePeriodRatio) { theScale = thePeriodRatio; }
     if (theScale < kVarispeed_MinGlideScale) { theScale = kVarispeed_MinGlideScale; }
     return theScale;
 }
@@ -396,6 +397,7 @@ static const AudioServerPlugInCustomPropertyInfo kVarispeed_CustomProperties[] =
     { kVarispeedProperty_CurrentSpeed, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_RampParameters, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_ClientBufferFrames, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
+    { kVarispeedProperty_GlideScale, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_DebugPeriod,  kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_DebugClockAlgorithm, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
     { kVarispeedProperty_DebugMaxRise, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList, kAudioServerPlugInCustomPropertyDataTypeNone },
@@ -2392,6 +2394,7 @@ static Boolean	BlackHole_HasDeviceProperty(AudioServerPlugInDriverRef inDriver, 
 		case kVarispeedProperty_CurrentSpeed:
 		case kVarispeedProperty_RampParameters:
 		case kVarispeedProperty_ClientBufferFrames:
+		case kVarispeedProperty_GlideScale:
 		case kVarispeedProperty_DebugPeriod:
 		case kVarispeedProperty_DebugClockAlgorithm:
 		case kVarispeedProperty_DebugMaxRise:
@@ -2465,6 +2468,7 @@ static OSStatus	BlackHole_IsDevicePropertySettable(AudioServerPlugInDriverRef in
 		case kVarispeedProperty_CurrentSpeed:
 		case kVarispeedProperty_RampParameters:
 		case kVarispeedProperty_ClientBufferFrames:
+		case kVarispeedProperty_GlideScale:
 		case kAudioDevicePropertyClockAlgorithm:
 		case kAudioDevicePropertyClockIsStable:
 			*outIsSettable = false;
@@ -2607,6 +2611,7 @@ static OSStatus	BlackHole_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 		case kVarispeedProperty_CurrentSpeed:
 		case kVarispeedProperty_RampParameters:
 		case kVarispeedProperty_ClientBufferFrames:
+		case kVarispeedProperty_GlideScale:
 		case kVarispeedProperty_DebugPeriod:
 		case kVarispeedProperty_DebugClockAlgorithm:
 		case kVarispeedProperty_DebugMaxRise:
@@ -3117,6 +3122,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 		case kVarispeedProperty_RampSeconds:
 		case kVarispeedProperty_CurrentSpeed:
 		case kVarispeedProperty_ClientBufferFrames:
+		case kVarispeedProperty_GlideScale:
 		case kVarispeedProperty_DebugPeriod:
 		case kVarispeedProperty_DebugClockAlgorithm:
 		case kVarispeedProperty_DebugMaxRise:
@@ -3132,6 +3138,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 				else if (inAddress->mSelector == kVarispeedProperty_DebugMaxRise) { theValue = gVarispeed_MaxRiseSemitonesPerPeriod; }
 				else if (inAddress->mSelector == kVarispeedProperty_DebugMaxFall) { theValue = gVarispeed_MaxFallSemitonesPerPeriod; }
 				else if (inAddress->mSelector == kVarispeedProperty_ClientBufferFrames) { UInt32 f = Varispeed_ClientBufferFrames(); theValue = (f == UINT32_MAX) ? 0 : f; }
+				else if (inAddress->mSelector == kVarispeedProperty_GlideScale) { theValue = Varispeed_GlideScale(); }
 				else { theValue = Varispeed_SpeedAt(mach_absolute_time()); }
 				pthread_mutex_unlock(&gDevice_IOMutex);
 				*((CFPropertyListRef*)outData) = CFNumberCreate(NULL, kCFNumberFloat64Type, &theValue);

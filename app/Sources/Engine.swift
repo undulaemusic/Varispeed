@@ -56,6 +56,8 @@ final class Engine: ObservableObject {
     @Published private(set) var dropouts: UInt64 = 0
     /// Smallest IO buffer the DAW is using on Varispeed (0 = no DAW playing to it right now).
     @Published private(set) var dawBufferFrames: Int = 0
+    /// The driver's current glide scale (depends on the DAW's buffer size).
+    @Published private(set) var glideScale: Double = 1
     /// Varispeed's sample rate (the DAW project's rate).
     @Published private(set) var varispeedSampleRate: Double = 48000
     private var lastSlowPoll = Date.distantPast
@@ -259,11 +261,7 @@ final class Engine: ObservableObject {
     /// The quickest a glide between two speeds can be at the DAW's current buffer size
     /// (same formula as the driver; see VarispeedProperties.h).
     func quickestGlide(from: Double, to: Double) -> Double {
-        var scale = 1.0
-        if dawBufferFrames > 0 {
-            scale = min(1, max(Double(kVarispeed_MinGlideScale), Double(dawBufferFrames) / Double(kVarispeed_FullSpeedBufferFrames)))
-        }
-        let step = (to > from ? Double(kVarispeed_MaxRiseSemitonesPerPeriod) : Double(kVarispeed_MaxFallSemitonesPerPeriod)) * scale
+        let step = (to > from ? Double(kVarispeed_MaxRiseSemitonesPerPeriod) : Double(kVarispeed_MaxFallSemitonesPerPeriod)) * glideScale
         let perFrame = log(2.0) / 12 * step / Double(kVarispeed_ZeroTimeStampPeriod)
         return max(Double(kVarispeed_MinRampSeconds), abs(1 / from - 1 / to) / (perFrame * varispeedSampleRate))
     }
@@ -275,6 +273,10 @@ final class Engine: ObservableObject {
             var frames = 0.0
             if VSControlGetDouble(dev, AudioObjectPropertySelector(kVarispeedProperty_ClientBufferFrames), &frames), Int(frames) != dawBufferFrames {
                 dawBufferFrames = Int(frames)
+            }
+            var scale = 1.0
+            if VSControlGetDouble(dev, AudioObjectPropertySelector(kVarispeedProperty_GlideScale), &scale), scale > 0, scale != glideScale {
+                glideScale = scale
             }
             let rate = VSControlNominalSampleRate(dev)
             if rate > 0 && rate != varispeedSampleRate { varispeedSampleRate = rate }

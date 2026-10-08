@@ -83,7 +83,7 @@ Press **Record**, play with the speed, press **Stop**. Each take appears in the 
 - **MIDI clock and Ableton Link drift** from external gear while you're not at 100%.
 - **Ableton Live's CPU meter reads high below about 50%.** It's the meter, not real load. In testing, the meter rose 3–4× at very slow speeds while Live's real CPU use went *down*. This is part of why the minimum speed is 50%.
 - **Latency:** the passthrough to your interface adds about 20 ms at 100%, more at slow speeds (roughly 25–45 ms) because each buffer lasts longer in real time.
-- **Buffer sizes** from 14 to 384 samples (the DAW's choice). At 64 and 32 the quickest glides are 2× and 4× gentler, to stay glitch-free.
+- **Buffer sizes** up to 512 samples. The quickest glides adapt to the buffer size to stay glitch-free: at 256 and 512 they're quickest (an octave in about 0.4–0.9 s), at 128 about twice as gentle, and gentler still at 64 and 32. The line under the Glide slider shows the current minimum.
 - Stereo only (2 channels). Sample rates 44.1, 48, 88.2 and 96 kHz.
 
 ## Uninstall
